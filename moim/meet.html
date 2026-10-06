@@ -141,6 +141,8 @@ create policy "meet-photos anon delete" on storage.objects for delete to anon us
 
   .brand { display: inline-block; font-family: var(--display); font-size: 18px; color: var(--stamp); text-decoration: none; margin-bottom: 14px; }
   .create h1 { color: var(--stamp); }
+  /* 앱 이름 '언제모여'는 굵은 제목체 대신 본문체 중간 굵기로 */
+  .brand, .create h1 { font-family: var(--body); font-weight: 600; letter-spacing: -0.02em; }
   /* 머리말: 달력 맨 위 장처럼 큰 월 숫자 */
   .head { display: flex; align-items: flex-end; gap: 14px; margin-bottom: 18px; }
   .head .month { font-family: var(--display); font-size: 72px; line-height: .9; letter-spacing: -1px; }
@@ -304,7 +306,7 @@ create policy "meet-photos anon delete" on storage.objects for delete to anon us
   .filebtn:focus-within { outline: 3px solid var(--sat); outline-offset: 2px; }
 
   /* 만들기 화면 */
-  .create h1 { font-family: var(--display); font-size: 40px; line-height: 1.15; margin-bottom: 8px; }
+  .create h1 { font-family: var(--body); font-weight: 600; letter-spacing: -0.02em; font-size: 38px; line-height: 1.15; margin-bottom: 8px; }
   .create p.lead { margin-bottom: 18px; word-break: keep-all; }
   .field { margin-bottom: 14px; }
   .field label { display: block; font-size: 14px; color: var(--ink-soft); margin-bottom: 6px; }
@@ -322,6 +324,7 @@ create policy "meet-photos anon delete" on storage.objects for delete to anon us
   <section id="v-setup" class="panel" hidden>
     <h2>Supabase 연결이 필요합니다</h2>
     <p class="muted">이 파일을 열어 SUPABASE_URL과 SUPABASE_ANON_KEY를 채우고, 파일 맨 위 주석의 SQL을 Supabase에서 한 번 실행해 주세요.</p>
+    <p id="v-setup-why" class="status err" style="margin-top:10px"></p>
   </section>
 
   <!-- 첫 화면: 내 모임 -->
@@ -593,7 +596,14 @@ function fillNights(sel) {
 /* ---------- 시작 ---------- */
 init();
 async function init() {
-  if (!SUPABASE_URL || !SUPABASE_ANON_KEY || !window.supabase) return show('v-setup');
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY || !window.supabase) {
+    const why = [];
+    if (!SUPABASE_URL) why.push('SUPABASE_URL 값이 비어 있습니다.');
+    if (!SUPABASE_ANON_KEY) why.push('SUPABASE_ANON_KEY 값이 비어 있습니다.');
+    if (!window.supabase) why.push('Supabase 라이브러리(cdn.jsdelivr.net)를 불러오지 못했습니다. 네트워크가 이 주소를 막고 있는지 확인해 주세요.');
+    $('v-setup-why').textContent = '확인된 원인: ' + why.join(' ');
+    return show('v-setup');
+  }
   sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
   if (!pollId && groupId && !qs.get('new')) return initGroup();
   if (!pollId) return groupId ? initCreate() : initHome();
