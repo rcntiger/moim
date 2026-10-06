@@ -1,0 +1,1431 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>언제모여</title>
+<meta name="description" content="각자 되는 날을 누르면 가장 많이 겹친 날이 모임날이 됩니다.">
+<meta property="og:title" content="언제모여">
+<meta property="og:description" content="되는 날을 눌러 주세요. 가장 많이 겹친 날이 모임날이 됩니다.">
+<!--
+==========================================================================
+ 설치 방법
+ 1) Supabase SQL Editor에서 아래 SQL을 한 번 실행합니다.
+ 2) 이 파일 아래쪽 스크립트의 SUPABASE_URL / SUPABASE_ANON_KEY 두 줄을 채웁니다.
+ 3) GitHub Pages 등에 올린 뒤 주소를 열어 모임을 만듭니다.
+
+create table if not exists meet_polls (
+  id            text primary key,
+  title         text not null,
+  month         text not null,            -- 시작 달 'YYYY-MM'
+  span          int not null default 1,   -- 몇 달에 걸쳐 고를지 (1 또는 2)
+  admin_key     text not null,
+  group_id      text,                     -- 같은 모임(동호회)의 기록을 묶는 번호
+  nights        int not null default 0,   -- 0=당일, 1=1박2일, 2=2박3일 ...
+  confirmed_day int,                      -- 확정된 시작일
+  places        jsonb not null default '[]'::jsonb,  -- 후보 장소 [{"id","name","note","url"}]
+  confirmed_place text,                   -- 확정된 후보 장소 id
+  created_at    timestamptz not null default now()
+);
+
+-- 이전 버전 테이블을 이미 만들었다면 아래 두 줄만 실행:
+-- alter table meet_polls add column if not exists nights int not null default 0;
+-- alter table meet_polls add column if not exists span int not null default 1;
+-- alter table meet_polls add column if not exists places jsonb not null default '[]'::jsonb;
+-- alter table meet_polls add column if not exists confirmed_place text;
+-- alter table meet_polls add column if not exists group_id text;
+
+-- 모임(동호회) 단위: 이름과 관리자 키. 일정(meet_polls)은 group_id로 여기에 묶임
+create table if not exists meet_groups (
+  id         text primary key,
+  name       text not null,
+  admin_key  text not null,
+  created_at timestamptz not null default now()
+);
+alter table meet_groups enable row level security;
+create policy "meet_groups anon all" on meet_groups for all to anon using (true) with check (true);
+
+create table if not exists meet_votes (
+  poll_id    text not null references meet_polls(id) on delete cascade,
+  name       text not null,
+  days       jsonb not null default '[]'::jsonb,   -- 시작 달 1일부터 센 날짜 번호 배열 (둘째 달은 이어서 31, 32 ...)
+  updated_at timestamptz not null default now(),
+  primary key (poll_id, name)
+);
+
+alter table meet_polls enable row level security;
+alter table meet_votes enable row level security;
+
+create policy "meet_polls anon all" on meet_polls for all to anon using (true) with check (true);
+create policy "meet_votes anon all" on meet_votes for all to anon using (true) with check (true);
+
+-- 장소 투표 (날짜 확정 후, 참석 가능한 사람이 후보 장소를 고름)
+create table if not exists meet_place_votes (
+  poll_id    text not null references meet_polls(id) on delete cascade,
+  name       text not null,
+  picks      jsonb not null default '[]'::jsonb,   -- 고른 후보 장소 id 배열
+  updated_at timestamptz not null default now(),
+  primary key (poll_id, name)
+);
+alter table meet_place_votes enable row level security;
+create policy "meet_place_votes anon all" on meet_place_votes for all to anon using (true) with check (true);
+
+-- 모임 기록 (장소, 일정, 회비, 메모)
+create table if not exists meet_records (
+  poll_id    text primary key references meet_polls(id) on delete cascade,
+  place      text not null default '',
+  schedule   text not null default '',
+  income     int  not null default 0,               -- 걷은 회비 합계
+  expenses   jsonb not null default '[]'::jsonb,    -- [{"item":"식비","amount":120000}, ...]
+  memo       text not null default '',
+  updated_at timestamptz not null default now()
+);
+alter table meet_records enable row level security;
+create policy "meet_records anon all" on meet_records for all to anon using (true) with check (true);
+
+-- 사진 보관함 (Storage 공개 버킷)
+insert into storage.buckets (id, name, public) values ('meet-photos', 'meet-photos', true)
+  on conflict (id) do nothing;
+create policy "meet-photos anon read"   on storage.objects for select to anon using (bucket_id = 'meet-photos');
+create policy "meet-photos anon upload" on storage.objects for insert to anon with check (bucket_id = 'meet-photos');
+create policy "meet-photos anon delete" on storage.objects for delete to anon using (bucket_id = 'meet-photos');
+==========================================================================
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Black+Han+Sans&family=IBM+Plex+Sans+KR:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #E9EFEC;
+    --paper: #FFFFFF;
+    --cell: #F3F6F4;
+    --ink: #17302B;
+    --ink-soft: #5B6F6A;
+    --line: #CBD7D2;
+    --leaf: #58B892;
+    --stamp: #D4313D;
+    --sat: #2C5FB5;
+    --display: "Black Han Sans", "IBM Plex Sans KR", sans-serif;
+    --body: "IBM Plex Sans KR", -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #101A18;
+      --paper: #182623;
+      --cell: #20312D;
+      --ink: #E6EFEC;
+      --ink-soft: #9DB1AB;
+      --line: #33473F;
+      --leaf: #3F9D79;
+      --stamp: #FF6B73;
+      --sat: #7FA8F0;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 16px;
+    line-height: 1.55;
+    padding: env(safe-area-inset-top, 0px) 0 env(safe-area-inset-bottom, 0px);
+  }
+  main { max-width: 520px; margin: 0 auto; padding: 20px 16px 56px; }
+  h1, h2, p { margin: 0; }
+  button, input, select { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  :focus-visible { outline: 3px solid var(--sat); outline-offset: 2px; }
+  [hidden] { display: none !important; }
+
+  .brand { display: inline-block; font-family: var(--display); font-size: 18px; color: var(--stamp); text-decoration: none; margin-bottom: 14px; }
+  .create h1 { color: var(--stamp); }
+  /* 앱 이름 '언제모여'는 굵은 제목체 대신 본문체 중간 굵기로 */
+  .brand, .create h1 { font-family: var(--body); font-weight: 600; letter-spacing: -0.02em; }
+  /* 머리말: 달력 맨 위 장처럼 큰 월 숫자 */
+  .head { display: flex; align-items: flex-end; gap: 14px; margin-bottom: 18px; }
+  .head .month { font-family: var(--display); font-size: 72px; line-height: .9; letter-spacing: -1px; }
+  .head .month.wide { font-size: 50px; letter-spacing: -1.5px; }
+  .head .month.wide small { font-size: 24px; }
+  .mtitle { font-family: var(--display); font-size: 22px; line-height: 1.2; margin: 18px 4px 8px; }
+  .mtitle:first-child { margin-top: 2px; }
+  .head .month small { font-size: 28px; margin-left: 2px; }
+  .head .meta { padding-bottom: 6px; min-width: 0; }
+  .head h1 { font-size: 20px; font-weight: 600; line-height: 1.3; word-break: keep-all; }
+  .head .year { color: var(--ink-soft); font-size: 14px; }
+
+  .panel { background: var(--paper); border-radius: 14px; padding: 16px; margin-bottom: 14px; }
+
+  /* 결과 */
+  .result { border-left: 6px solid var(--stamp); border-radius: 4px 14px 14px 4px; }
+  .result .label { font-size: 14px; color: var(--ink-soft); }
+  .result .date { font-family: var(--display); font-size: 34px; line-height: 1.2; margin-top: 2px; }
+  .result .sub { font-size: 15px; margin-top: 4px; word-break: keep-all; }
+  .result.empty { border-left-color: var(--line); }
+  .result.empty .date { font-family: var(--body); font-size: 17px; font-weight: 500; }
+
+  /* 이름 */
+  .who label { display: block; font-size: 14px; color: var(--ink-soft); margin-bottom: 6px; }
+  .who .row { display: flex; gap: 8px; }
+  .who input {
+    flex: 1; min-width: 0; height: 46px; padding: 0 12px;
+    border: 1.5px solid var(--line); border-radius: 10px; background: var(--paper);
+  }
+  .btn {
+    height: 46px; padding: 0 16px; border-radius: 10px; border: 1.5px solid var(--ink);
+    background: var(--ink); color: var(--paper); font-weight: 600; white-space: nowrap;
+  }
+  .btn.ghost { background: transparent; color: var(--ink); }
+  .btn.small { height: 34px; padding: 0 10px; font-size: 14px; border-radius: 8px; }
+  .status { font-size: 14px; color: var(--ink-soft); margin-top: 8px; min-height: 21px; }
+  .status.err { color: var(--stamp); }
+
+  /* 달력 */
+  .cal { padding: 12px 10px 14px; }
+  .dow, .grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px; }
+  .dow { font-size: 13px; text-align: center; color: var(--ink-soft); margin-bottom: 6px; }
+  .dow span:first-child, .day.sun .num { color: var(--stamp); }
+  .dow span:last-child, .day.sat .num { color: var(--sat); }
+  .day {
+    position: relative; aspect-ratio: 1 / 1.12; padding: 0; border: 0; border-radius: 10px;
+    background: color-mix(in srgb, var(--leaf) calc(var(--heat, 0) * 72%), var(--cell));
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px;
+    -webkit-tap-highlight-color: transparent; touch-action: manipulation;
+  }
+  .day .num {
+    width: 32px; height: 32px; display: grid; place-items: center;
+    font-size: 17px; font-weight: 600; border-radius: 50%; border: 2.5px solid transparent;
+  }
+  .day .cnt { font-size: 12px; line-height: 1; height: 12px; color: var(--ink); opacity: .8; }
+  /* 내가 체크한 날: 인주 도장 */
+  .day.mine .num { border-color: var(--stamp); color: var(--stamp) !important; transform: rotate(-7deg); }
+  .day.mine.just .num { animation: press .22s ease-out; }
+  @keyframes press { from { transform: rotate(-7deg) scale(1.5); opacity: .3; } to { transform: rotate(-7deg) scale(1); opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) { .day.mine.just .num { animation: none; } }
+  .day.top { box-shadow: inset 0 0 0 2.5px var(--ink); }
+  .day.fixed { box-shadow: inset 0 0 0 3px var(--stamp); }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; color: var(--ink-soft); margin-top: 12px; padding: 0 4px; }
+  .legend i { display: inline-block; width: 14px; height: 14px; border-radius: 50%; vertical-align: -2px; margin-right: 5px; }
+  .legend .l-mine { border: 2.5px solid var(--stamp); }
+  .legend .l-top { border-radius: 4px; box-shadow: inset 0 0 0 2.5px var(--ink); }
+  .legend .l-heat { border-radius: 4px; background: var(--leaf); }
+
+  /* 순위, 참여자 */
+  h2 { font-size: 16px; font-weight: 600; margin-bottom: 10px; }
+  .rank { list-style: none; margin: 0; padding: 0; }
+  .rank li { padding: 10px 0; border-top: 1px solid var(--line); }
+  .rank li:first-child { border-top: 0; padding-top: 0; }
+  .rank .line { display: flex; align-items: center; gap: 10px; }
+  .rank .d { font-weight: 600; flex: 1; }
+  .rank .n { font-family: var(--display); font-size: 20px; }
+  .rank .names { font-size: 14px; color: var(--ink-soft); margin-top: 2px; word-break: keep-all; }
+  .people { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { display: inline-flex; align-items: center; gap: 4px; background: var(--cell); border-radius: 999px; padding: 4px 12px; font-size: 14px; }
+  .chip button { border: 0; background: none; padding: 0 0 0 2px; font-size: 16px; line-height: 1; color: var(--ink-soft); }
+  .muted { color: var(--ink-soft); font-size: 14px; }
+  .share { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+
+  /* 모임 기록 목록 */
+  a.btn { display: inline-flex; align-items: center; justify-content: center; text-decoration: none; }
+  .yr { font-family: var(--display); font-size: 26px; line-height: 1.2; margin: 22px 4px 8px; display: flex; align-items: baseline; gap: 8px; }
+  .yr small { font-family: var(--body); font-size: 14px; color: var(--ink-soft); font-weight: 400; }
+  .gitem { display: block; background: var(--paper); border-radius: 14px; padding: 14px 16px; margin-bottom: 8px; color: inherit; text-decoration: none; border-left: 6px solid var(--stamp); border-radius: 4px 14px 14px 4px; }
+  .gitem.open { border-left-color: var(--line); }
+  .gitem .gd { font-weight: 600; font-size: 17px; }
+  .gitem .gt { margin-top: 1px; }
+  .gitem .gs { font-size: 14px; color: var(--ink-soft); margin-top: 2px; word-break: keep-all; }
+
+  .gitem { display: flex; gap: 12px; align-items: center; }
+  .gitem .gbody { flex: 1; min-width: 0; }
+  .gitem .gc { width: 68px; height: 68px; border-radius: 8px; object-fit: cover; flex: none; background: var(--cell); }
+
+  .hrow { display: flex; gap: 6px; align-items: stretch; margin-bottom: 8px; }
+  .hrow .gitem { flex: 1; margin-bottom: 0; min-width: 0; }
+  .hrow > button { width: 44px; border: 0; border-radius: 10px; background: var(--paper); color: var(--ink-soft); font-size: 18px; }
+  .tag { display: inline-block; font-size: 12px; border: 1.5px solid var(--stamp); color: var(--stamp); border-radius: 999px; padding: 0 8px; margin-left: 6px; vertical-align: 2px; font-weight: 600; }
+
+  /* 사진 보기 창 */
+  #lb {
+    position: fixed; inset: 0; z-index: 50; background: rgba(0, 0, 0, .94);
+    display: flex; align-items: center; justify-content: center;
+    padding: calc(env(safe-area-inset-top, 0px) + 56px) 0 calc(env(safe-area-inset-bottom, 0px) + 64px);
+    touch-action: pan-y;
+  }
+  #lb img { max-width: 100%; max-height: 100%; object-fit: contain; user-select: none; -webkit-user-drag: none; }
+  #lb button, #lb a {
+    position: absolute; color: #fff; background: rgba(255, 255, 255, .16); border: 0; border-radius: 999px;
+    height: 46px; min-width: 46px; display: grid; place-items: center; font-size: 26px; line-height: 1; text-decoration: none;
+  }
+  #lb button:focus-visible, #lb a:focus-visible { outline: 3px solid #fff; }
+  #lb-close { top: calc(env(safe-area-inset-top, 0px) + 6px); right: 10px; }
+  #lb-prev { left: 8px; top: 50%; transform: translateY(-50%); }
+  #lb-next { right: 8px; top: 50%; transform: translateY(-50%); }
+  #lb #lb-open { bottom: calc(env(safe-area-inset-bottom, 0px) + 10px); right: 10px; font-size: 15px; padding: 0 16px; }
+  #lb-count { position: absolute; top: calc(env(safe-area-inset-top, 0px) + 18px); left: 16px; color: #fff; font-size: 15px; font-variant-numeric: tabular-nums; }
+
+  /* 장소 정하기 */
+  .pl-note { font-size: 14px; margin-top: 2px; word-break: break-word; }
+  .pl-note a { color: var(--sat); }
+  .pl-actions { display: flex; gap: 6px; margin-top: 8px; }
+  .pl-fixed .date { font-family: var(--display); font-size: 28px; line-height: 1.25; word-break: keep-all; }
+  .pl-fixed .label { font-size: 14px; color: var(--ink-soft); }
+  #pl-admin { border-top: 1px solid var(--line); margin-top: 16px; padding-top: 14px; }
+
+  /* 모임 기록 */
+  .rec-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+  .rec-head h2 { margin: 0; }
+  .rec { margin: 0; }
+  .rec dt { font-size: 13px; color: var(--ink-soft); margin-top: 12px; }
+  .rec dt:first-child { margin-top: 0; }
+  .rec dd { margin: 2px 0 0; white-space: pre-wrap; word-break: break-word; }
+  .exp { width: 100%; border-collapse: collapse; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .exp td { padding: 7px 0; border-top: 1px solid var(--line); }
+  .exp td:last-child { text-align: right; white-space: nowrap; padding-left: 12px; }
+  .exp tr.sum td { font-weight: 600; }
+  .exp tr.left td { border-top: 2px solid var(--ink); font-weight: 600; }
+  .exp .minus { color: var(--stamp); }
+  .field textarea {
+    width: 100%; min-height: 110px; padding: 10px 12px; border: 1.5px solid var(--line); border-radius: 10px;
+    background: var(--paper); font: inherit; color: inherit; resize: vertical;
+  }
+  .exp-row { display: grid; grid-template-columns: 1fr 110px 40px; gap: 6px; margin-bottom: 6px; }
+  .exp-row input { width: 100%; height: 44px; padding: 0 10px; border: 1.5px solid var(--line); border-radius: 10px; background: var(--paper); min-width: 0; }
+  .exp-row input.amt { text-align: right; }
+  .exp-row button { height: 44px; border: 0; background: var(--cell); border-radius: 10px; font-size: 18px; }
+  .form-actions { display: flex; gap: 8px; }
+  .form-actions .btn { flex: 1; }
+  .photos { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 12px; }
+  .ph { position: relative; aspect-ratio: 1; border-radius: 8px; overflow: hidden; background: var(--cell); }
+  .ph img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .ph button {
+    position: absolute; top: 4px; right: 4px; width: 30px; height: 30px; border-radius: 50%; border: 0;
+    background: rgba(0, 0, 0, .6); color: #fff; font-size: 17px; line-height: 1;
+  }
+  .filebtn { display: inline-flex; align-items: center; cursor: pointer; }
+  .filebtn:focus-within { outline: 3px solid var(--sat); outline-offset: 2px; }
+
+  /* 만들기 화면 */
+  .create h1 { font-family: var(--body); font-weight: 600; letter-spacing: -0.02em; font-size: 38px; line-height: 1.15; margin-bottom: 8px; }
+  .create p.lead { margin-bottom: 18px; word-break: keep-all; }
+  .field { margin-bottom: 14px; }
+  .field label { display: block; font-size: 14px; color: var(--ink-soft); margin-bottom: 6px; }
+  .field input, .field select {
+    width: 100%; height: 46px; padding: 0 12px; border: 1.5px solid var(--line); border-radius: 10px; background: var(--paper);
+  }
+  .field .two { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .wide { width: 100%; }
+</style>
+</head>
+<body>
+<main>
+
+  <!-- 설정 안 됨 -->
+  <section id="v-setup" class="panel" hidden>
+    <h2>Supabase 연결이 필요합니다</h2>
+    <p class="muted">이 파일을 열어 SUPABASE_URL과 SUPABASE_ANON_KEY를 채우고, 파일 맨 위 주석의 SQL을 Supabase에서 한 번 실행해 주세요.</p>
+    <p id="v-setup-why" class="status err" style="margin-top:10px"></p>
+  </section>
+
+  <!-- 첫 화면: 내 모임 -->
+  <section id="v-home" class="create" hidden>
+    <h1>언제모여</h1>
+    <p class="lead">각자 되는 날을 누르면 가장 많이 겹친 날이 모임날이 됩니다. 장소 투표와 모임 기록까지 모임별로 관리하세요.</p>
+    <h2>내 모임</h2>
+    <div id="h-list"></div>
+    <p class="muted" style="margin:8px 4px 20px">이 기기에서 열어 본 모임이 여기에 모입니다. 다른 기기에서는 받은 링크를 한 번 열면 추가됩니다.</p>
+    <div class="panel">
+      <div class="field">
+        <label for="h-name">새 모임 만들기</label>
+        <input id="h-name" maxlength="30" placeholder="모임 이름 (예: ○○산악회)">
+      </div>
+      <button id="h-go" class="btn wide">모임 만들기</button>
+      <p id="h-status" class="status" role="status"></p>
+    </div>
+  </section>
+
+  <!-- 일정 만들기 -->
+  <section id="v-create" class="create" hidden>
+    <h1>언제모여</h1>
+    <p class="lead" id="c-lead">달을 정해 일정을 만들고 링크를 회원들에게 보내세요. 각자 되는 날을 누르면 가장 많이 겹친 날이 모임날이 됩니다.</p>
+    <div class="panel">
+      <div class="field">
+        <label for="c-title">일정 이름</label>
+        <input id="c-title" maxlength="40" placeholder="예: 11월 정기모임">
+      </div>
+      <div class="field">
+        <label for="c-year">시작하는 달</label>
+        <div class="two">
+          <select id="c-year" aria-label="연도"></select>
+          <select id="c-month" aria-label="월"></select>
+        </div>
+      </div>
+      <div class="field">
+        <label for="c-span">고를 수 있는 기간</label>
+        <select id="c-span"></select>
+      </div>
+      <div class="field">
+        <label for="c-nights">일정 길이</label>
+        <select id="c-nights"></select>
+      </div>
+      <button id="c-go" class="btn wide">일정 만들기</button>
+      <p id="c-status" class="status" role="status"></p>
+    </div>
+  </section>
+
+  <!-- 모임 화면 -->
+  <section id="v-poll" hidden>
+    <a class="brand" id="p-brand" href="./">언제모여</a><span class="muted" id="p-gname" style="margin-left:8px"></span>
+    <header class="head">
+      <div class="month" id="p-month"></div>
+      <div class="meta">
+        <div class="year" id="p-year"></div>
+        <h1 id="p-title"></h1>
+      </div>
+    </header>
+
+    <div class="panel result" id="p-result" aria-live="polite"></div>
+
+    <!-- 장소 정하기: 날짜가 확정되면 나타남 -->
+    <div class="panel" id="p-place" hidden>
+      <h2>모임 장소 정하기</h2>
+      <div id="pl-fixed" class="pl-fixed"></div>
+      <div id="pl-vote">
+        <div class="who" id="pl-who">
+          <label for="pl-name">내 이름 (날짜 체크할 때 쓴 이름)</label>
+          <div class="row">
+            <input id="pl-name" maxlength="20" autocomplete="name" placeholder="이름을 적고 장소를 고르세요">
+            <button id="pl-name-ok" class="btn ghost">확인</button>
+          </div>
+        </div>
+        <p id="pl-status" class="status" role="status"></p>
+        <ul class="rank" id="pl-list"></ul>
+      </div>
+      <div id="pl-admin" hidden>
+        <div class="field"><label for="pl-new-name">후보 장소 추가</label><input id="pl-new-name" maxlength="60" placeholder="장소 이름"></div>
+        <div class="field"><input id="pl-new-note" maxlength="100" placeholder="한 줄 설명 (선택)" aria-label="한 줄 설명"></div>
+        <div class="field"><input id="pl-new-url" maxlength="300" inputmode="url" placeholder="지도 링크 (선택)" aria-label="지도 링크"></div>
+        <button id="pl-add" type="button" class="btn ghost wide">후보 추가</button>
+      </div>
+    </div>
+
+    <!-- 모임 기록: 날짜가 확정되면 나타남 -->
+    <div class="panel" id="p-record" hidden>
+      <div class="rec-head">
+        <h2>모임 기록</h2>
+        <button id="r-edit" class="btn small ghost" hidden>기록 수정</button>
+      </div>
+      <div id="r-view"></div>
+
+      <div id="r-form" hidden>
+        <div class="field"><label for="r-place">모임 장소</label><input id="r-place" maxlength="100" placeholder="예: 강화도 ○○펜션"></div>
+        <div class="field"><label for="r-schedule">일정</label><textarea id="r-schedule" placeholder="10:00 집결&#10;12:00 점심&#10;14:00 산행"></textarea></div>
+        <div class="field"><label for="r-income">걷은 회비 합계 (원)</label><input id="r-income" inputmode="numeric" placeholder="0"></div>
+        <div class="field">
+          <label>회비 사용내역</label>
+          <div id="r-exp"></div>
+          <button id="r-add" type="button" class="btn small ghost">항목 추가</button>
+        </div>
+        <div class="field"><label for="r-memo">메모</label><textarea id="r-memo" placeholder="참석자, 후기, 다음 모임 때 챙길 것 등"></textarea></div>
+        <div class="form-actions">
+          <button id="r-cancel" type="button" class="btn ghost">취소</button>
+          <button id="r-save" type="button" class="btn">기록 저장</button>
+        </div>
+      </div>
+
+      <h2 id="r-photos-h" style="margin-top:20px">사진</h2>
+      <div class="photos" id="r-photos"></div>
+      <label class="btn ghost filebtn">사진 올리기<input type="file" id="r-file" accept="image/*" multiple style="position:absolute;opacity:0;width:1px;height:1px"></label>
+      <p id="r-status" class="status" role="status"></p>
+    </div>
+
+    <div class="panel who">
+      <label for="p-name">내 이름</label>
+      <div class="row">
+        <input id="p-name" maxlength="20" autocomplete="name" placeholder="이름을 적고 날짜를 누르세요">
+        <button id="p-name-ok" class="btn ghost">확인</button>
+      </div>
+      <p id="p-hint" class="muted" style="margin-top:8px" hidden></p>
+      <p id="p-status" class="status" role="status"></p>
+    </div>
+
+    <div class="panel cal">
+      <div id="p-grid"></div>
+      <div class="legend">
+        <span><i class="l-mine"></i>내가 되는 날</span>
+        <span><i class="l-heat"></i>진할수록 많이 겹침</span>
+        <span><i class="l-top"></i>1위</span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2 id="p-rank-h">많이 겹친 날</h2>
+      <ul class="rank" id="p-rank"></ul>
+    </div>
+
+    <div class="panel">
+      <h2 id="p-people-h">참여한 사람</h2>
+      <div class="people" id="p-people"></div>
+    </div>
+
+    <div class="panel">
+      <h2>회원에게 보내기</h2>
+      <div class="share">
+        <button id="p-copy" class="btn">참여 링크 복사</button>
+        <a id="p-group" class="btn ghost" href="./">지난 모임 보기</a>
+        <span id="p-copy-status" class="muted" role="status"></span>
+      </div>
+      <div id="p-admin-set" class="field" style="margin:14px 0 0" hidden>
+        <label for="p-span">기간과 일정 길이 (바꾸면 확정이 풀립니다)</label>
+        <div class="two">
+          <select id="p-span" aria-label="고를 수 있는 기간"></select>
+          <select id="p-nights" aria-label="일정 길이"></select>
+        </div>
+      </div>
+      <p id="p-admin-note" class="muted" style="margin-top:10px" hidden>지금 열린 주소는 관리자용입니다. 날짜 확정과 기록 수정이 가능하니 즐겨찾기에 보관하고, 회원에게는 위 버튼으로 복사한 링크를 보내세요. 다음 모임은 "지난 모임 보기"에서 만들면 같은 기록으로 이어지고 관리자 권한도 유지됩니다.</p>
+    </div>
+  </section>
+
+  <!-- 지난 모임 목록 -->
+  <section id="v-group" hidden>
+    <a class="brand" id="g-brand" href="./">언제모여</a>
+    <h1 id="g-title" style="font-size:28px;line-height:1.25">모임 기록</h1>
+    <p class="muted" id="g-sum" style="margin:2px 0 14px"></p>
+    <div class="field"><input id="g-q" type="search" placeholder="모임 이름이나 장소로 찾기" aria-label="모임 이름이나 장소로 찾기"></div>
+    <div id="g-list"></div>
+    <a id="g-new" class="btn wide" style="margin-top:14px" hidden>새 일정 잡기</a>
+    <div class="share" id="g-admin" style="margin-top:8px" hidden>
+      <button id="g-copy" class="btn ghost" type="button">회원용 링크 복사</button>
+      <button id="g-rename" class="btn ghost" type="button">모임 이름 바꾸기</button>
+      <span id="g-status" class="muted" role="status"></span>
+    </div>
+  </section>
+
+  <section id="v-missing" class="panel" hidden>
+    <h2>모임을 찾을 수 없습니다</h2>
+    <p class="muted">링크가 잘렸는지 확인하거나, 모임을 만든 분에게 링크를 다시 받아 주세요.</p>
+  </section>
+</main>
+
+<div id="lb" role="dialog" aria-modal="true" aria-label="사진 보기" hidden>
+  <div id="lb-count" aria-live="polite"></div>
+  <button id="lb-close" type="button" aria-label="닫기">×</button>
+  <img id="lb-img" alt="">
+  <button id="lb-prev" type="button" aria-label="이전 사진">‹</button>
+  <button id="lb-next" type="button" aria-label="다음 사진">›</button>
+  <a id="lb-open" target="_blank" rel="noopener">원본 열기</a>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+/* ===== 여기 두 줄만 채우세요 ===== */
+const SUPABASE_URL = 'https://rcwneqlwzfplvrihvzyu.supabase.co';        // 예: https://xxxxxxxx.supabase.co
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJjd25lcWx3emZwbHZyaWh2enl1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTEyNjg4ODAsImV4cCI6MjEwNjg0NDg4MH0.StdImJfoPxzTQ2-Ys2_U9BG8mf71n1NVfMr8WKVa8zI';   // anon public key
+/* ================================ */
+
+const POLL_MS = 5000;
+const DOW = ['일', '월', '화', '수', '목', '금', '토'];
+const $ = id => document.getElementById(id);
+const qs = new URLSearchParams(location.search);
+const pollId = qs.get('p');
+const adminKey = qs.get('admin');
+const groupId = (qs.get('g') || '').replace(/[^a-z0-9]/gi, '');
+
+let sb = null;
+const S = {
+  poll: null, votes: [], isAdmin: false,
+  myName: '', myDays: new Set(),
+  dirty: false, saving: false, lastTapped: null,
+  record: null, photos: [], editing: false,
+  pvotes: [], myPicks: new Set(), pBusy: false, attendees: [],
+};
+const BUCKET = 'meet-photos';
+
+function show(id) {
+  ['v-setup', 'v-home', 'v-create', 'v-poll', 'v-group', 'v-missing'].forEach(v => $(v).hidden = v !== id);
+}
+function rid(n) {
+  const a = 'abcdefghjkmnpqrstuvwxyz23456789';
+  const r = crypto.getRandomValues(new Uint8Array(n));
+  return Array.from(r, x => a[x % a.length]).join('');
+}
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+}
+function ym() { const [y, m] = S.poll.month.split('-').map(Number); return { y, m }; }
+/* 날짜 번호: 시작 달 1일 = 1, 둘째 달은 이어서 센다 (JS Date가 넘어가는 날짜를 다음 달로 계산) */
+function dateOf(idx) { const { y, m } = ym(); return new Date(y, m - 1, idx); }
+function dowOf(idx) { return dateOf(idx).getDay(); }
+function spanOf() { return Math.max(1, Math.min(2, Number(S.poll && S.poll.span) || 1)); }
+function monthsOf() {
+  const { y, m } = ym(), out = []; let off = 0;
+  for (let i = 0; i < spanOf(); i++) {
+    const d = new Date(y, m - 1 + i, 1);
+    const last = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+    out.push({ y: d.getFullYear(), m: d.getMonth() + 1, off, last, first: d.getDay() });
+    off += last;
+  }
+  return out;
+}
+function md(idx) { const d = dateOf(idx); return { m: d.getMonth() + 1, d: d.getDate(), w: DOW[d.getDay()] }; }
+function dayLabel(idx) { const a = md(idx); return `${a.m}월 ${a.d}일 (${a.w})`; }
+function spanLabel(n) { return n > 1 ? `${n}개월 (다음 달까지)` : '1개월'; }
+function fillSpan(sel) {
+  for (let n = 1; n <= 2; n++) { const o = el('option', null, spanLabel(n)); o.value = n; sel.append(o); }
+}
+const MAX_NIGHTS = 6;
+function nightsOf() { return Math.max(0, Math.min(MAX_NIGHTS, Number(S.poll && S.poll.nights) || 0)); }
+function durLabel(n) { return n ? `${n}박 ${n + 1}일` : '당일'; }
+function rangeLabel(s) {
+  const n = nightsOf(); if (!n) return dayLabel(s);
+  const a = md(s), b = md(s + n);
+  return `${a.m}월 ${a.d}일(${a.w})~${b.m === a.m ? '' : b.m + '월 '}${b.d}일(${b.w})`;
+}
+function rangeShort(s) {
+  const n = nightsOf(), two = spanOf() > 1, a = md(s), b = md(s + n);
+  const f = x => two ? `${x.m}/${x.d}` : `${x.d}일`;
+  return n ? `${f(a)}~${f(b)}` : f(a);
+}
+function fillNights(sel) {
+  for (let n = 0; n <= MAX_NIGHTS; n++) { const o = el('option', null, durLabel(n)); o.value = n; sel.append(o); }
+}
+
+/* ---------- 시작 ---------- */
+init();
+async function init() {
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY || !window.supabase) {
+    const why = [];
+    if (!SUPABASE_URL) why.push('SUPABASE_URL 값이 비어 있습니다.');
+    if (!SUPABASE_ANON_KEY) why.push('SUPABASE_ANON_KEY 값이 비어 있습니다.');
+    if (!window.supabase) why.push('Supabase 라이브러리(cdn.jsdelivr.net)를 불러오지 못했습니다. 네트워크가 이 주소를 막고 있는지 확인해 주세요.');
+    $('v-setup-why').textContent = '확인된 원인: ' + why.join(' ');
+    return show('v-setup');
+  }
+  sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  if (!pollId && groupId && !qs.get('new')) return initGroup();
+  if (!pollId) return groupId ? initCreate() : initHome();
+
+  try { S.myName = localStorage.getItem('meet_name') || ''; } catch (e) {}
+  $('p-name').value = S.myName;
+  $('pl-name').value = S.myName;
+
+  const ok = await fetchAll(true);
+  if (!ok) return show('v-missing');
+  show('v-poll');
+  bindPoll();
+  bindRecord();
+  bindPlace();
+  render();
+  loadPhotos();
+  loadGroupInfo();
+  setInterval(async () => { if (!document.hidden && await fetchAll(false)) render(); }, POLL_MS);
+  document.addEventListener('visibilitychange', async () => {
+    if (!document.hidden && await fetchAll(false)) render();
+  });
+}
+
+/* ---------- 내 모임 (이 기기에 기억) ---------- */
+function myGroups() {
+  try { const a = JSON.parse(localStorage.getItem('meet_groups') || '[]'); return Array.isArray(a) ? a : []; }
+  catch (e) { return []; }
+}
+function remember(id, name, admin) {
+  const a = myGroups(), old = a.find(x => x.id === id) || {};
+  const rec = { id, name: name || old.name || '이름 없는 모임', admin: admin || old.admin || '' };
+  try { localStorage.setItem('meet_groups', JSON.stringify([rec, ...a.filter(x => x.id !== id)].slice(0, 50))); } catch (e) {}
+}
+function groupUrl(id, admin) { return `${location.pathname}?g=${id}` + (admin ? `&admin=${admin}` : ''); }
+async function fetchGroup(id) {
+  const r = await sb.from('meet_groups').select('*').eq('id', id).maybeSingle();
+  return r.error ? null : r.data;
+}
+async function loadGroupInfo() {
+  const gid = S.poll.group_id || S.poll.id;
+  const g = await fetchGroup(gid);
+  $('p-gname').textContent = g ? g.name : '';
+  remember(gid, g && g.name, S.isAdmin ? adminKey : '');
+}
+
+function initHome() {
+  show('v-home');
+  const draw = () => {
+    const L = $('h-list'); L.innerHTML = '';
+    const a = myGroups();
+    if (!a.length) { L.append(el('p', 'muted', '아직 없습니다. 아래에서 새 모임을 만들거나, 받은 링크를 열어 주세요.')); return; }
+    a.forEach(x => {
+      const row = el('div', 'hrow'), link = el('a', 'gitem' + (x.admin ? '' : ' open')), body = el('div', 'gbody');
+      link.href = groupUrl(x.id, x.admin);
+      const nm = el('div', 'gd', x.name);
+      if (x.admin) nm.append(el('span', 'tag', '관리자'));
+      body.append(nm); link.append(body);
+      const del = el('button', null, '×'); del.type = 'button'; del.setAttribute('aria-label', `${x.name} 목록에서 지우기`);
+      del.addEventListener('click', () => {
+        if (!confirm(`'${x.name}'을(를) 이 기기의 목록에서 지울까요?` + (x.admin ? '\n관리자 주소도 함께 지워지니 따로 보관해 두세요.' : '') + '\n모임 자체는 삭제되지 않습니다.')) return;
+        try { localStorage.setItem('meet_groups', JSON.stringify(myGroups().filter(z => z.id !== x.id))); } catch (e) {}
+        draw();
+      });
+      row.append(link, del); L.append(row);
+    });
+  };
+  draw();
+  $('h-go').addEventListener('click', async () => {
+    const name = $('h-name').value.trim();
+    if (!name) { $('h-status').className = 'status err'; $('h-status').textContent = '모임 이름을 적어 주세요.'; $('h-name').focus(); return; }
+    const id = rid(8), key = rid(12);
+    $('h-go').disabled = true; $('h-status').className = 'status'; $('h-status').textContent = '모임을 만드는 중…';
+    const { error } = await sb.from('meet_groups').insert({ id, name, admin_key: key });
+    if (error) {
+      $('h-go').disabled = false; $('h-status').className = 'status err';
+      $('h-status').textContent = '모임을 만들지 못했습니다. meet_groups 테이블과 키 설정을 확인해 주세요. (' + error.message + ')';
+      return;
+    }
+    remember(id, name, key);
+    location.href = groupUrl(id, key);
+  });
+}
+
+/* ---------- 일정 만들기 ---------- */
+function initCreate() {
+  show('v-create');
+  fetchGroup(groupId).then(g => {
+    if (g) $('c-lead').textContent = `'${g.name}'의 새 일정을 만듭니다. 달을 정하고 링크를 회원들에게 보내면, 각자 되는 날을 눌러 가장 많이 겹친 날이 모임날이 됩니다.`;
+  });
+  const now = new Date();
+  const next = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+  for (let y = now.getFullYear(); y <= now.getFullYear() + 1; y++) {
+    const o = el('option', null, y + '년'); o.value = y; $('c-year').append(o);
+  }
+  for (let m = 1; m <= 12; m++) {
+    const o = el('option', null, m + '월'); o.value = m; $('c-month').append(o);
+  }
+  fillNights($('c-nights'));
+  fillSpan($('c-span')); $('c-span').value = 2;
+  $('c-year').value = next.getFullYear();
+  $('c-month').value = next.getMonth() + 1;
+
+  $('c-go').addEventListener('click', async () => {
+    const grp = await fetchGroup(groupId);
+    if (grp && grp.admin_key !== adminKey) {
+      $('c-status').className = 'status err';
+      $('c-status').textContent = '일정은 관리자만 만들 수 있습니다. 관리자 주소로 다시 열어 주세요.';
+      return;
+    }
+    const y = $('c-year').value, m = String($('c-month').value).padStart(2, '0');
+    const title = $('c-title').value.trim() || `${Number(m)}월 모임`;
+    const id = rid(8), key = (groupId && adminKey) ? adminKey : rid(12);
+    $('c-go').disabled = true;
+    $('c-status').className = 'status';
+    $('c-status').textContent = '일정을 만드는 중…';
+    const nights = Number($('c-nights').value) || 0;
+    const { error } = await sb.from('meet_polls').insert({ id, title, month: `${y}-${m}`, admin_key: key, nights, span: Number($('c-span').value) || 1, group_id: groupId || id });
+    if (error) {
+      $('c-go').disabled = false;
+      $('c-status').className = 'status err';
+      $('c-status').textContent = '일정을 만들지 못했습니다. 테이블과 키 설정을 확인해 주세요. (' + error.message + ')';
+      return;
+    }
+    location.href = `${location.pathname}?p=${id}&admin=${key}`;
+  });
+}
+
+/* ---------- 지난 모임 목록 (연도별) ---------- */
+async function initGroup() {
+  show('v-group');
+  const L = $('g-list');
+  const { data, error } = await sb.from('meet_polls')
+    .select('id,title,month,nights,confirmed_day,places,confirmed_place,admin_key,group_id')
+    .or(`group_id.eq.${groupId},id.eq.${groupId}`);
+  if (error) { L.append(el('p', 'status err', '목록을 불러오지 못했습니다. group_id 컬럼이 있는지 확인해 주세요. (' + error.message + ')')); return; }
+  const polls = data || [];
+  let grp = await fetchGroup(groupId);
+  if (!grp && !polls.length) return show('v-missing');
+  const isAdmin = !!adminKey && ((grp && grp.admin_key === adminKey) || (!grp && polls.some(x => x.admin_key === adminKey)));
+  const setName = () => {
+    $('g-title').textContent = grp ? grp.name : '모임 기록';
+    document.title = (grp ? grp.name + ' | ' : '') + '언제모여';
+  };
+  setName();
+  remember(groupId, grp && grp.name, isAdmin ? adminKey : '');
+  $('g-admin').hidden = !isAdmin;
+  $('g-copy').addEventListener('click', async () => {
+    const url = location.origin + groupUrl(groupId, '');
+    try { await navigator.clipboard.writeText(url); $('g-status').textContent = '복사했습니다'; }
+    catch (e) { prompt('아래 주소를 복사하세요', url); }
+  });
+  $('g-rename').addEventListener('click', async () => {
+    if (!isAdmin) return;
+    const name = (prompt('모임 이름', grp ? grp.name : '') || '').trim();
+    if (!name) return;
+    const { error } = await sb.from('meet_groups').upsert({ id: groupId, name, admin_key: adminKey }, { onConflict: 'id' });
+    if (error) { $('g-status').textContent = '이름을 바꾸지 못했습니다.'; return; }
+    grp = { id: groupId, name, admin_key: adminKey }; setName();
+    remember(groupId, name, adminKey); $('g-status').textContent = '이름을 바꿨습니다';
+  });
+  const recs = {};
+  if (polls.length) {
+    const r = await sb.from('meet_records').select('poll_id,place,income,expenses').in('poll_id', polls.map(x => x.id));
+    (r.data || []).forEach(x => { recs[x.poll_id] = x; });
+  }
+
+  const fmt = d => `${d.getMonth() + 1}월 ${d.getDate()}일(${DOW[d.getDay()]})`;
+  const items = polls.map(x => {
+    const [y, m] = x.month.split('-').map(Number), n = Number(x.nights) || 0, rec = recs[x.id] || {};
+    const done = !!x.confirmed_day;
+    const start = new Date(y, m - 1, done ? x.confirmed_day : 1);
+    const end = new Date(y, m - 1, (x.confirmed_day || 1) + n);
+    const cp = (Array.isArray(x.places) ? x.places : []).find(z => z.id === x.confirmed_place);
+    const used = (Array.isArray(rec.expenses) ? rec.expenses : []).reduce((a, z) => a + (Number(z.amount) || 0), 0);
+    return {
+      id: x.id, title: x.title, done, start, year: start.getFullYear(),
+      date: done ? (n ? `${fmt(start)}~${end.getMonth() === start.getMonth() ? '' : (end.getMonth() + 1) + '월 '}${end.getDate()}일(${DOW[end.getDay()]})` : fmt(start)) : `${m}월 중, 날짜 정하는 중`,
+      place: rec.place || (cp ? cp.name : ''), used,
+      mine: isAdmin && x.admin_key === adminKey,
+    };
+  }).sort((a, b) => b.start - a.start);
+
+  const doneCnt = items.filter(x => x.done).length;
+  $('g-sum').textContent = items.length ? `확정된 모임 ${doneCnt}회` + (items.length > doneCnt ? `, 날짜 정하는 중 ${items.length - doneCnt}건` : '') : '';
+  const self = `${location.pathname}?g=${groupId}` + (isAdmin ? `&admin=${adminKey}` : '');
+  $('g-brand').setAttribute('href', location.pathname);
+  if (isAdmin) { $('g-new').hidden = false; $('g-new').setAttribute('href', `${location.pathname}?new=1&g=${groupId}&admin=${adminKey}`); }
+
+  const draw = q => {
+    L.innerHTML = '';
+    q = (q || '').trim().toLowerCase();
+    const list = items.filter(x => !q || (x.title + ' ' + x.place + ' ' + x.date).toLowerCase().includes(q));
+    if (!list.length) { L.append(el('p', 'muted', items.length ? '찾는 모임이 없습니다.' : (isAdmin ? '아직 잡은 일정이 없습니다. 아래에서 새 일정을 잡아 보세요.' : '아직 잡은 일정이 없습니다.'))); return; }
+    let year = null;
+    list.forEach(x => {
+      if (x.year !== year) {
+        year = x.year;
+        const hd = el('h2', 'yr', `${year}년`);
+        hd.append(el('small', null, `${list.filter(z => z.year === year && z.done).length}회`));
+        L.append(hd);
+      }
+      const a = el('a', 'gitem' + (x.done ? '' : ' open'));
+      a.href = `${location.pathname}?p=${x.id}` + (x.mine ? `&admin=${adminKey}` : '');
+      const body = el('div', 'gbody');
+      body.append(el('div', 'gd', x.date), el('div', 'gt', x.title));
+      const sub = [x.place, x.used ? `회비 사용 ${x.used.toLocaleString('ko-KR')}원` : '', x.photos ? `사진 ${x.photos}장` : ''].filter(Boolean).join(', ');
+      if (sub) body.append(el('div', 'gs', sub));
+      if (x.cover) { const im = el('img', 'gc'); im.src = x.cover; im.loading = 'lazy'; im.alt = ''; a.append(im); }
+      a.append(body);
+      L.append(a);
+    });
+  };
+  draw('');
+  $('g-q').addEventListener('input', e => draw(e.target.value));
+
+  /* 대표 사진: 각 모임에 가장 먼저 올린 사진 */
+  await Promise.all(items.map(async x => {
+    const r = await sb.storage.from(BUCKET).list(x.id, { limit: 300, sortBy: { column: 'name', order: 'asc' } });
+    const fs = (r.data || []).filter(f => f.name && !f.name.startsWith('.'));
+    if (!fs.length) return;
+    x.photos = fs.length;
+    x.cover = sb.storage.from(BUCKET).getPublicUrl(`${x.id}/${fs[0].name}`).data.publicUrl;
+  }));
+  if (items.some(x => x.cover)) draw($('g-q').value);
+}
+
+/* ---------- 데이터 ---------- */
+async function fetchAll(first) {
+  const [p, v, r, pv] = await Promise.all([
+    sb.from('meet_polls').select('*').eq('id', pollId).maybeSingle(),
+    sb.from('meet_votes').select('name,days').eq('poll_id', pollId),
+    sb.from('meet_records').select('*').eq('poll_id', pollId).maybeSingle(),
+    sb.from('meet_place_votes').select('name,picks').eq('poll_id', pollId),
+  ]);
+  if (!r.error) S.record = r.data || null;   // 기록 테이블이 없어도 날짜 정하기는 동작
+  if (p.error || v.error) return !first && !!S.poll;   // 일시 오류면 기존 화면 유지
+  if (!p.data) return false;
+  S.poll = p.data;
+  S.isAdmin = !!adminKey && adminKey === p.data.admin_key;
+  S.votes = (v.data || []).map(r => ({ name: r.name, days: Array.isArray(r.days) ? r.days : [] }));
+  if (!S.dirty && !S.saving) syncMine();
+  if (!pv.error) {
+    S.pvotes = (pv.data || []).map(x => ({ name: x.name, picks: Array.isArray(x.picks) ? x.picks : [] }));
+    if (!S.pBusy) syncPicks();
+  }
+  return true;
+}
+function syncMine() {
+  const row = S.votes.find(r => r.name === S.myName);
+  S.myDays = new Set(row ? row.days : []);
+}
+function syncPicks() {
+  const row = S.pvotes.find(x => x.name === S.myName);
+  S.myPicks = new Set(row ? row.picks : []);
+}
+function allVotes() {
+  const others = S.votes.filter(r => r.name !== S.myName);
+  const hadRow = S.votes.some(r => r.name === S.myName);
+  if (S.myName && (S.myDays.size || hadRow)) {
+    others.push({ name: S.myName, days: [...S.myDays] });
+  }
+  return others.filter(r => r.days.length).sort((a, b) => a.name.localeCompare(b.name, 'ko'));
+}
+
+let saveTimer = null;
+function queueSave() {
+  S.dirty = true;
+  setStatus('저장 중…');
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(save, 500);
+}
+async function save() {
+  if (S.saving) { saveTimer = setTimeout(save, 300); return; }
+  S.saving = true; S.dirty = false;
+  const name = S.myName;
+  const days = [...S.myDays].sort((a, b) => a - b);
+  const { error } = await sb.from('meet_votes').upsert(
+    { poll_id: pollId, name, days, updated_at: new Date().toISOString() },
+    { onConflict: 'poll_id,name' });
+  S.saving = false;
+  if (error) { S.dirty = true; setStatus('저장하지 못했습니다. 날짜를 다시 눌러 주세요.', true); return; }
+  const i = S.votes.findIndex(r => r.name === name);
+  if (i >= 0) S.votes[i].days = days; else S.votes.push({ name, days });
+  if (!S.dirty) setStatus(days.length ? `${name} 님, ${days.length}일 저장됨` : '체크한 날이 없습니다');
+}
+function setStatus(t, err) {
+  $('p-status').textContent = t;
+  $('p-status').className = 'status' + (err ? ' err' : '');
+}
+
+/* ---------- 이벤트 ---------- */
+function bindPoll() {
+  const applyName = () => {
+    const n = $('p-name').value.trim();
+    $('p-name').value = n;
+    if (n === S.myName) return;
+    S.myName = n; S.dirty = false;
+    try { localStorage.setItem('meet_name', n); } catch (e) {}
+    syncMine(); syncPicks(); $('pl-name').value = n;
+    setStatus(!n ? '' : S.myDays.size ? `${n} 님이 체크한 날을 불러왔습니다` : `${n} 님, 되는 날을 모두 눌러 주세요`);
+    render();
+  };
+  $('p-name-ok').addEventListener('click', applyName);
+  $('p-name').addEventListener('change', applyName);
+  $('p-name').addEventListener('keydown', e => { if (e.key === 'Enter') { applyName(); $('p-name').blur(); } });
+
+  $('p-grid').addEventListener('click', e => {
+    const b = e.target.closest('.day'); if (!b) return;
+    const typed = $('p-name').value.trim();
+    if (typed !== S.myName) applyName();
+    if (!S.myName) { setStatus('먼저 이름을 적어 주세요.', true); $('p-name').focus(); return; }
+    const d = Number(b.dataset.day);
+    if (S.myDays.has(d)) { S.myDays.delete(d); S.lastTapped = null; }
+    else { S.myDays.add(d); S.lastTapped = d; }
+    queueSave();
+    render();
+  });
+
+  $('p-copy').addEventListener('click', async () => {
+    const url = `${location.origin}${location.pathname}?p=${pollId}`;
+    try { await navigator.clipboard.writeText(url); $('p-copy-status').textContent = '복사했습니다'; }
+    catch (e) { prompt('아래 주소를 복사하세요', url); }
+  });
+
+  $('p-rank').addEventListener('click', async e => {
+    const b = e.target.closest('button[data-fix]'); if (!b || !S.isAdmin) return;
+    const v = b.dataset.fix === 'null' ? null : Number(b.dataset.fix);
+    const { error } = await sb.from('meet_polls').update({ confirmed_day: v }).eq('id', pollId);
+    if (!error) { S.poll.confirmed_day = v; render(); }
+  });
+
+  fillNights($('p-nights')); fillSpan($('p-span'));
+  const changeSetting = async () => {
+    if (!S.isAdmin) return;
+    const nights = Number($('p-nights').value) || 0, span = Number($('p-span').value) || 1;
+    const { error } = await sb.from('meet_polls').update({ nights, span, confirmed_day: null }).eq('id', pollId);
+    if (error) { alert('설정을 바꾸지 못했습니다. nights, span 컬럼이 있는지 확인해 주세요.\n' + error.message); }
+    else { S.poll.nights = nights; S.poll.span = span; S.poll.confirmed_day = null; }
+    render();
+  };
+  $('p-nights').addEventListener('change', changeSetting);
+  $('p-span').addEventListener('change', changeSetting);
+
+  $('p-result').addEventListener('click', async e => {
+    if (!e.target.closest('button[data-unfix]') || !S.isAdmin) return;
+    if (!confirm('확정을 취소하고 날짜를 다시 정할까요? 적어 둔 모임 기록은 그대로 남습니다.')) return;
+    const { error } = await sb.from('meet_polls').update({ confirmed_day: null }).eq('id', pollId);
+    if (!error) { S.poll.confirmed_day = null; render(); }
+  });
+
+  $('p-people').addEventListener('click', async e => {
+    const b = e.target.closest('button[data-del]'); if (!b || !S.isAdmin) return;
+    const name = b.dataset.del;
+    if (!confirm(`${name} 님의 체크를 삭제할까요?`)) return;
+    const { error } = await sb.from('meet_votes').delete().eq('poll_id', pollId).eq('name', name);
+    if (!error) {
+      S.votes = S.votes.filter(r => r.name !== name);
+      if (name === S.myName) S.myDays = new Set();
+      render();
+    }
+  });
+}
+
+/* ---------- 장소 정하기 ---------- */
+function placesOf() { return Array.isArray(S.poll.places) ? S.poll.places : []; }
+function confirmedPlace() { return placesOf().find(x => x.id === S.poll.confirmed_place) || null; }
+function setPStatus(t, err) { $('pl-status').textContent = t; $('pl-status').className = 'status' + (err ? ' err' : ''); }
+function safeUrl(u) { u = (u || '').trim(); if (!u) return ''; return /^https?:\/\//i.test(u) ? u : 'https://' + u; }
+function placeNote(pl) {
+  const box = el('div', 'pl-note');
+  if (pl.note) box.append(el('span', 'muted', pl.note + (pl.url ? '  ' : '')));
+  if (pl.url) { const a = el('a', null, '지도 보기'); a.href = safeUrl(pl.url); a.target = '_blank'; a.rel = 'noopener'; box.append(a); }
+  return box;
+}
+
+function renderPlace(fixed) {
+  $('p-place').hidden = !fixed;
+  if (!fixed) return;
+  const places = placesOf(), cp = confirmedPlace();
+  $('pl-admin').hidden = !S.isAdmin || !!cp;
+  $('pl-vote').hidden = !!cp;
+
+  const F = $('pl-fixed'); F.innerHTML = '';
+  if (cp) {
+    F.append(el('div', 'label', '장소 확정'), el('div', 'date', cp.name));
+    if (cp.note || cp.url) F.append(placeNote(cp));
+    if (S.isAdmin) {
+      const b = el('button', 'btn small ghost', '장소 확정 취소'); b.dataset.place = ''; b.dataset.act = 'fix'; b.style.marginTop = '12px';
+      F.append(b);
+    }
+    return;
+  }
+
+  /* 참석 가능한 사람의 표만 집계 */
+  const att = new Set(S.attendees);
+  const rows = S.pvotes.filter(x => x.name !== S.myName);
+  if (S.myName) rows.push({ name: S.myName, picks: [...S.myPicks] });
+  const by = {};
+  rows.forEach(x => { if (att.has(x.name)) x.picks.forEach(id => (by[id] = by[id] || []).push(x.name)); });
+  const cnt = id => (by[id] || []).length;
+  const sorted = places.map((pl, i) => ({ pl, i })).sort((a, b) => cnt(b.pl.id) - cnt(a.pl.id) || a.i - b.i).map(x => x.pl);
+  const max = sorted.length ? cnt(sorted[0].id) : 0;
+
+  $('pl-who').hidden = !places.length;
+  const L = $('pl-list'); L.innerHTML = '';
+  if (!places.length) {
+    L.append(el('li', 'muted', S.isAdmin ? '아래에서 후보 장소를 추가해 주세요. 후보가 올라오면 참석 가능한 회원들이 고를 수 있습니다.' : '아직 후보 장소가 올라오지 않았습니다.'));
+    return;
+  }
+  sorted.forEach(pl => {
+    const n = cnt(pl.id), mine = S.myPicks.has(pl.id);
+    const li = el('li'), line = el('div', 'line');
+    line.append(el('span', 'd', pl.name + (max && n === max ? '  (1위)' : '')), el('span', 'n', n + '명'));
+    const t = el('button', 'btn small' + (mine ? '' : ' ghost'), mine ? '선택함' : '선택');
+    t.type = 'button'; t.dataset.place = pl.id; t.dataset.act = 'pick'; t.setAttribute('aria-pressed', mine);
+    line.append(t);
+    li.append(line);
+    if (pl.note || pl.url) li.append(placeNote(pl));
+    if (n) li.append(el('div', 'names', by[pl.id].join(', ')));
+    if (S.isAdmin) {
+      const act = el('div', 'pl-actions');
+      const f = el('button', 'btn small', '이 장소로 확정'); f.type = 'button'; f.dataset.place = pl.id; f.dataset.act = 'fix';
+      const d = el('button', 'btn small ghost', '후보 삭제'); d.type = 'button'; d.dataset.place = pl.id; d.dataset.act = 'del';
+      act.append(f, d); li.append(act);
+    }
+    L.append(li);
+  });
+}
+
+function bindPlace() {
+  const applyName = () => {
+    const n = $('pl-name').value.trim();
+    $('pl-name').value = n;
+    if (n === S.myName) return;
+    S.myName = n; S.dirty = false; $('p-name').value = n;
+    try { localStorage.setItem('meet_name', n); } catch (e) {}
+    syncMine(); syncPicks();
+    setPStatus(!n ? '' : S.attendees.includes(n) ? `${n} 님, 좋은 장소를 모두 골라 주세요` : `${n} 님은 확정된 날짜에 체크하지 않아 장소를 고를 수 없습니다`, !!n && !S.attendees.includes(n));
+    render();
+  };
+  $('pl-name-ok').addEventListener('click', applyName);
+  $('pl-name').addEventListener('change', applyName);
+  $('pl-name').addEventListener('keydown', e => { if (e.key === 'Enter') { applyName(); $('pl-name').blur(); } });
+
+  const updatePoll = async patch => {
+    const { error } = await sb.from('meet_polls').update(patch).eq('id', pollId);
+    if (error) { setPStatus('저장하지 못했습니다. places, confirmed_place 컬럼을 확인해 주세요. (' + error.message + ')', true); return false; }
+    Object.assign(S.poll, patch); render(); return true;
+  };
+
+  $('p-place').addEventListener('click', async e => {
+    const b = e.target.closest('button[data-act]'); if (!b) return;
+    const id = b.dataset.place, act = b.dataset.act;
+    if (act === 'fix' && S.isAdmin) { await updatePoll({ confirmed_place: id || null }); return; }
+    if (act === 'del' && S.isAdmin) {
+      if (!confirm('이 후보 장소를 삭제할까요?')) return;
+      await updatePoll({ places: placesOf().filter(x => x.id !== id) }); return;
+    }
+    if (act !== 'pick') return;
+    if ($('pl-name').value.trim() !== S.myName) applyName();
+    if (!S.myName) { setPStatus('먼저 이름을 적어 주세요.', true); $('pl-name').focus(); return; }
+    if (!S.attendees.includes(S.myName)) { setPStatus(`${S.myName} 님은 확정된 날짜에 체크하지 않아 장소를 고를 수 없습니다. 날짜 체크 때 쓴 이름인지 확인해 주세요.`, true); return; }
+    if (S.myPicks.has(id)) S.myPicks.delete(id); else S.myPicks.add(id);
+    render();
+    S.pBusy = true; setPStatus('저장 중…');
+    const name = S.myName, picks = [...S.myPicks];
+    const { error } = await sb.from('meet_place_votes').upsert(
+      { poll_id: pollId, name, picks, updated_at: new Date().toISOString() }, { onConflict: 'poll_id,name' });
+    S.pBusy = false;
+    if (error) { setPStatus('저장하지 못했습니다. meet_place_votes 테이블을 확인해 주세요.', true); return; }
+    const i = S.pvotes.findIndex(x => x.name === name);
+    if (i >= 0) S.pvotes[i].picks = picks; else S.pvotes.push({ name, picks });
+    setPStatus(picks.length ? `${name} 님, ${picks.length}곳 선택 저장됨` : '선택한 장소가 없습니다');
+  });
+
+  $('pl-add').addEventListener('click', async () => {
+    if (!S.isAdmin) return;
+    const name = $('pl-new-name').value.trim();
+    if (!name) { setPStatus('장소 이름을 적어 주세요.', true); $('pl-new-name').focus(); return; }
+    const pl = { id: rid(6), name, note: $('pl-new-note').value.trim(), url: safeUrl($('pl-new-url').value) };
+    if (await updatePoll({ places: [...placesOf(), pl] })) {
+      $('pl-new-name').value = $('pl-new-note').value = $('pl-new-url').value = '';
+      setPStatus(`'${name}' 후보를 추가했습니다`);
+    }
+  });
+}
+
+/* ---------- 모임 기록 ---------- */
+const won = n => (Number(n) || 0).toLocaleString('ko-KR') + '원';
+const toInt = v => Number(String(v).replace(/[^\d]/g, '')) || 0;
+function setRStatus(t, err) { $('r-status').textContent = t; $('r-status').className = 'status' + (err ? ' err' : ''); }
+
+function renderRecord(fixed) {
+  $('p-record').hidden = !fixed;
+  if (!fixed) return;
+  $('r-edit').hidden = !S.isAdmin || S.editing;
+  $('r-view').hidden = S.editing;
+  $('r-form').hidden = !S.editing;
+  if (S.editing) return;
+
+  const V = $('r-view'); V.innerHTML = '';
+  const r = S.record;
+  const dl = el('dl', 'rec');
+  dl.append(el('dt', null, '날짜'), el('dd', null, rangeLabel(fixed) + (nightsOf() ? `, ${durLabel(nightsOf())}` : '')));
+  if (!r) {
+    V.append(dl, el('p', 'muted', S.isAdmin ? '기록 수정을 눌러 장소, 일정, 회비 내역을 적어 주세요.' : '아직 적힌 기록이 없습니다.'));
+    V.lastChild.style.marginTop = '10px';
+    return;
+  }
+  const place = r.place || (confirmedPlace() || {}).name;
+  if (place) dl.append(el('dt', null, '장소'), el('dd', null, place));
+  if (r.schedule) dl.append(el('dt', null, '일정'), el('dd', null, r.schedule));
+  V.append(dl);
+
+  const exp = Array.isArray(r.expenses) ? r.expenses : [];
+  if (r.income || exp.length) {
+    const used = exp.reduce((a, x) => a + (Number(x.amount) || 0), 0), left = (r.income || 0) - used;
+    dl.append(el('dt', null, '회비'));
+    const t = el('table', 'exp');
+    const row = (a, b, cls) => { const tr = el('tr', cls); tr.append(el('td', null, a), el('td', null, b)); t.append(tr); return tr; };
+    row('걷은 회비', won(r.income), 'sum');
+    exp.forEach(x => row(x.item || '(항목 없음)', '-' + won(x.amount)));
+    row('사용 합계', won(used), 'sum');
+    const tr = row(left < 0 ? '부족한 금액' : '남은 금액', won(Math.abs(left)), 'left');
+    if (left < 0) tr.lastChild.classList.add('minus');
+    V.append(t);
+  }
+  if (r.memo) { const d2 = el('dl', 'rec'); d2.style.marginTop = '12px'; d2.append(el('dt', null, '메모'), el('dd', null, r.memo)); V.append(d2); }
+}
+
+function addExpRow(item, amount) {
+  const row = el('div', 'exp-row');
+  const a = el('input'); a.placeholder = '내용'; a.maxLength = 40; a.value = item || ''; a.setAttribute('aria-label', '사용 내용');
+  const b = el('input', 'amt'); b.placeholder = '금액'; b.inputMode = 'numeric'; b.value = amount ? amount : ''; b.setAttribute('aria-label', '금액');
+  const x = el('button', null, '×'); x.type = 'button'; x.setAttribute('aria-label', '항목 삭제');
+  x.addEventListener('click', () => row.remove());
+  row.append(a, b, x);
+  $('r-exp').append(row);
+  return a;
+}
+
+function bindRecord() {
+  $('r-edit').addEventListener('click', () => {
+    const r = S.record || {};
+    $('r-place').value = r.place || (confirmedPlace() || {}).name || '';
+    $('r-schedule').value = r.schedule || '';
+    $('r-income').value = r.income || '';
+    $('r-memo').value = r.memo || '';
+    $('r-exp').innerHTML = '';
+    (Array.isArray(r.expenses) ? r.expenses : []).forEach(x => addExpRow(x.item, x.amount));
+    if (!$('r-exp').children.length) addExpRow();
+    S.editing = true; setRStatus(''); render();
+    $('r-place').focus();
+  });
+  $('r-add').addEventListener('click', () => addExpRow().focus());
+  $('r-cancel').addEventListener('click', () => { S.editing = false; render(); });
+  $('r-save').addEventListener('click', async () => {
+    if (!S.isAdmin) return;
+    const expenses = [...$('r-exp').children].map(row => {
+      const [a, b] = row.querySelectorAll('input');
+      return { item: a.value.trim(), amount: toInt(b.value) };
+    }).filter(x => x.item || x.amount);
+    const rec = {
+      poll_id: pollId, place: $('r-place').value.trim(), schedule: $('r-schedule').value.trim(),
+      income: toInt($('r-income').value), expenses, memo: $('r-memo').value.trim(),
+      updated_at: new Date().toISOString(),
+    };
+    $('r-save').disabled = true; setRStatus('기록 저장 중…');
+    const { error } = await sb.from('meet_records').upsert(rec, { onConflict: 'poll_id' });
+    $('r-save').disabled = false;
+    if (error) { setRStatus('기록을 저장하지 못했습니다. meet_records 테이블을 확인해 주세요. (' + error.message + ')', true); return; }
+    S.record = rec; S.editing = false; setRStatus('기록을 저장했습니다'); render();
+  });
+
+  $('r-file').addEventListener('change', async e => {
+    const files = [...e.target.files]; e.target.value = '';
+    if (!files.length) return;
+    let done = 0, fail = 0;
+    for (const f of files) {
+      setRStatus(`사진 올리는 중… (${done + fail + 1}/${files.length})`);
+      const blob = await shrink(f);
+      const ext = blob.type === 'image/jpeg' ? 'jpg' : (f.name.split('.').pop() || 'jpg').toLowerCase().replace(/[^a-z0-9]/g, '');
+      const path = `${pollId}/${Date.now()}_${rid(5)}.${ext}`;
+      const { error } = await sb.storage.from(BUCKET).upload(path, blob, { contentType: blob.type || f.type, cacheControl: '31536000' });
+      if (error) fail++; else done++;
+    }
+    setRStatus(fail ? `${done}장 올림, ${fail}장 실패. meet-photos 버킷과 정책을 확인해 주세요.` : `사진 ${done}장을 올렸습니다`, !!fail);
+    loadPhotos();
+  });
+
+  $('r-photos').addEventListener('click', e => {
+    if (e.target.closest('button')) return;
+    const a = e.target.closest('a.ph'); if (!a) return;
+    e.preventDefault();
+    lbOpen([...$('r-photos').children].indexOf(a));
+  });
+
+  $('r-photos').addEventListener('click', async e => {
+    const b = e.target.closest('button[data-path]'); if (!b || !S.isAdmin) return;
+    e.preventDefault();
+    if (!confirm('이 사진을 삭제할까요?')) return;
+    const { error } = await sb.storage.from(BUCKET).remove([b.dataset.path]);
+    if (error) setRStatus('사진을 삭제하지 못했습니다.', true); else loadPhotos();
+  });
+}
+
+/* 사진 보기 창: 좌우 버튼, 밀어서 넘기기, 키보드 화살표 */
+const LB = { i: 0, back: null, bound: false };
+function lbShow(i) {
+  const n = S.photos.length; if (!n) return lbClose();
+  LB.i = (i + n) % n;
+  const ph = S.photos[LB.i];
+  $('lb-img').src = ph.url; $('lb-img').alt = `모임 사진 ${LB.i + 1}`;
+  $('lb-open').href = ph.url;
+  $('lb-count').textContent = `${LB.i + 1} / ${n}`;
+  $('lb-prev').hidden = $('lb-next').hidden = n < 2;
+  if (n > 1) { new Image().src = S.photos[(LB.i + 1) % n].url; }   // 다음 장 미리 받기
+}
+function lbOpen(i) {
+  LB.back = document.activeElement;
+  $('lb').hidden = false; document.body.style.overflow = 'hidden';
+  lbShow(i); $('lb-close').focus();
+  if (LB.bound) return; LB.bound = true;
+  $('lb-close').addEventListener('click', lbClose);
+  $('lb-prev').addEventListener('click', () => lbShow(LB.i - 1));
+  $('lb-next').addEventListener('click', () => lbShow(LB.i + 1));
+  $('lb').addEventListener('click', e => { if (e.target === $('lb')) lbClose(); });
+  document.addEventListener('keydown', e => {
+    if ($('lb').hidden) return;
+    if (e.key === 'Escape') lbClose();
+    else if (e.key === 'ArrowLeft') lbShow(LB.i - 1);
+    else if (e.key === 'ArrowRight') lbShow(LB.i + 1);
+  });
+  let x0 = null, y0 = null;
+  $('lb').addEventListener('touchstart', e => { x0 = e.touches[0].clientX; y0 = e.touches[0].clientY; }, { passive: true });
+  $('lb').addEventListener('touchend', e => {
+    if (x0 == null) return;
+    const dx = e.changedTouches[0].clientX - x0, dy = e.changedTouches[0].clientY - y0; x0 = null;
+    if (Math.abs(dx) > 45 && Math.abs(dx) > Math.abs(dy) * 1.5) lbShow(LB.i + (dx < 0 ? 1 : -1));
+    else if (dy > 90 && Math.abs(dy) > Math.abs(dx) * 1.5) lbClose();   // 아래로 밀면 닫기
+  }, { passive: true });
+}
+function lbClose() {
+  $('lb').hidden = true; document.body.style.overflow = ''; $('lb-img').removeAttribute('src');
+  if (LB.back && LB.back.focus) LB.back.focus();
+}
+
+/* 올리기 전에 긴 변 1600px JPEG로 줄여 용량 절약. 실패하면 원본 그대로 */
+async function shrink(file) {
+  try {
+    const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
+    const k = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
+    const c = document.createElement('canvas');
+    c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+    c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+    const blob = await new Promise(res => c.toBlob(res, 'image/jpeg', 0.82));
+    return blob || file;
+  } catch (e) { return file; }
+}
+
+async function loadPhotos() {
+  const { data, error } = await sb.storage.from(BUCKET).list(pollId, { limit: 300, sortBy: { column: 'name', order: 'asc' } });
+  if (error) return;
+  S.photos = (data || []).filter(f => f.name && !f.name.startsWith('.')).map(f => {
+    const path = `${pollId}/${f.name}`;
+    return { path, url: sb.storage.from(BUCKET).getPublicUrl(path).data.publicUrl };
+  });
+  const P = $('r-photos'); P.innerHTML = '';
+  $('r-photos-h').textContent = S.photos.length ? `사진 ${S.photos.length}장` : '사진';
+  S.photos.forEach((ph, i) => {
+    const a = el('a', 'ph'); a.href = ph.url; a.target = '_blank'; a.rel = 'noopener';
+    const img = el('img'); img.src = ph.url; img.loading = 'lazy'; img.alt = `모임 사진 ${i + 1}`;
+    a.append(img);
+    if (S.isAdmin) {
+      const x = el('button', null, '×'); x.type = 'button'; x.dataset.path = ph.path; x.setAttribute('aria-label', `사진 ${i + 1} 삭제`);
+      a.append(x);
+    }
+    P.append(a);
+  });
+}
+
+/* ---------- 화면 ---------- */
+function render() {
+  const N = nightsOf();
+  const months = monthsOf();
+  const last = months.reduce((a, x) => a + x.last, 0);   // 전체 날짜 수
+  document.title = S.poll.title + ' | 언제모여';
+  $('p-month').innerHTML = '';
+  const m0 = months[0], m1 = months[months.length - 1];
+  $('p-month').className = 'month' + (months.length > 1 ? ' wide' : '');
+  $('p-month').append(months.map(x => x.m).join('~'), el('small', null, '월'));
+  $('p-year').textContent = `${m0.y === m1.y ? m0.y : m0.y + '~' + m1.y}년, ${durLabel(N)}`;
+  $('p-title').textContent = S.poll.title;
+  $('p-admin-note').hidden = !S.isAdmin;
+  const gurl = `${location.pathname}?g=${S.poll.group_id || S.poll.id}` + (S.isAdmin ? `&admin=${adminKey}` : '');
+  $('p-brand').setAttribute('href', location.pathname);
+  $('p-group').setAttribute('href', gurl);
+  $('p-admin-set').hidden = !S.isAdmin;
+  if (document.activeElement !== $('p-nights')) $('p-nights').value = N;
+  if (document.activeElement !== $('p-span')) $('p-span').value = months.length;
+  $('p-hint').hidden = !N;
+  $('p-hint').textContent = N ? `${durLabel(N)} 일정입니다. ${N + 1}일 연속으로 되는 날을 모두 눌러 주세요.` : '';
+  $('p-rank-h').textContent = N ? `많이 겹친 ${durLabel(N)} 일정` : '많이 겹친 날';
+
+  /* 기간 밖 번호(기간을 줄인 경우)는 집계에서 제외 */
+  const votes = allVotes().map(v => ({ name: v.name, days: v.days.filter(d => d >= 1 && d <= last) }))
+    .filter(v => v.days.length);
+  /* 날짜별 가능 인원 (달력 색) */
+  const byDay = {};
+  votes.forEach(v => v.days.forEach(d => (byDay[d] = byDay[d] || []).push(v.name)));
+  const dayMax = Math.max(0, ...Object.values(byDay).map(a => a.length));
+
+  /* 시작일별: 시작일부터 N박 동안 매일 되는 사람 */
+  const byStart = {};
+  votes.forEach(v => {
+    const set = new Set(v.days);
+    for (let s = 1; s + N <= last; s++) {
+      let ok = true;
+      for (let k = 0; k <= N; k++) if (!set.has(s + k)) { ok = false; break; }
+      if (ok) (byStart[s] = byStart[s] || []).push(v.name);
+    }
+  });
+  const ranked = Object.keys(byStart).map(Number)
+    .sort((a, b) => byStart[b].length - byStart[a].length || a - b);
+  const max = ranked.length ? byStart[ranked[0]].length : 0;
+  const tops = ranked.filter(s => byStart[s].length === max);
+  const fixed = S.poll.confirmed_day && S.poll.confirmed_day + N <= last ? S.poll.confirmed_day : null;
+
+  /* 달력에 테두리로 표시할 날 */
+  const marked = new Set();
+  (fixed ? [fixed] : tops).forEach(s => { for (let k = 0; k <= N; k++) marked.add(s + k); });
+
+  /* 결과 */
+  const R = $('p-result'); R.innerHTML = '';
+  R.className = 'panel result' + (max || fixed ? '' : ' empty');
+  const all = N ? `${N + 1}일 모두 ` : '';
+  if (fixed) {
+    const who = byStart[fixed] || [];
+    R.append(el('div', 'label', '모임날 확정'), el('div', 'date', rangeLabel(fixed)),
+      el('div', 'sub', `${who.length}명 ${all}가능` + (who.length ? `: ${who.join(', ')}` : '')));
+    if (S.isAdmin) {
+      const b = el('button', 'btn small ghost', '확정 취소하고 다시 정하기');
+      b.dataset.unfix = '1'; b.style.marginTop = '12px';
+      R.append(b);
+    }
+  } else if (!votes.length) {
+    R.append(el('div', 'date', '아직 체크한 사람이 없습니다'),
+      el('div', 'sub', '이름을 적고 되는 날을 모두 눌러 주세요.'));
+  } else if (!max) {
+    R.append(el('div', 'date', `${N + 1}일 연속으로 되는 사람이 아직 없습니다`),
+      el('div', 'sub', `${durLabel(N)} 일정이라 이어진 날을 함께 체크해야 집계됩니다.`));
+  } else if (tops.length === 1) {
+    R.append(el('div', 'label', '모임날'), el('div', 'date', rangeLabel(tops[0])),
+      el('div', 'sub', `${votes.length}명 중 ${max}명 ${all}가능`));
+  } else {
+    R.append(el('div', 'label', `공동 1위 ${tops.length}개`),
+      el('div', 'date', tops.slice(0, 3).map(rangeShort).join(', ') + (tops.length > 3 ? ' 외' : '')),
+      el('div', 'sub', `각 ${max}명 ${all}가능. 더 체크가 모이면 정해지고, 모임을 만든 분이 하나를 확정할 수도 있습니다.`));
+  }
+
+  /* 달력 */
+  const G = $('p-grid'); G.innerHTML = '';
+  months.forEach(mo => {
+    if (months.length > 1) G.append(el('div', 'mtitle', `${mo.m}월`));
+    const head = el('div', 'dow'); head.setAttribute('aria-hidden', 'true');
+    DOW.forEach(w => head.append(el('span', null, w)));
+    const grid = el('div', 'grid');
+    for (let i = 0; i < mo.first; i++) grid.append(el('span'));
+    for (let d = 1; d <= mo.last; d++) {
+      const idx = mo.off + d;
+      const n = (byDay[idx] || []).length, dow = (mo.first + d - 1) % 7, mine = S.myDays.has(idx);
+      const b = el('button', 'day');
+      b.type = 'button'; b.dataset.day = idx;
+      if (dow === 0) b.classList.add('sun');
+      if (dow === 6) b.classList.add('sat');
+      if (mine) b.classList.add('mine');
+      if (mine && S.lastTapped === idx) b.classList.add('just');
+      if (marked.has(idx)) b.classList.add(fixed ? 'fixed' : 'top');
+      b.style.setProperty('--heat', dayMax ? (n / dayMax).toFixed(2) : 0);
+      b.setAttribute('aria-pressed', mine);
+      b.setAttribute('aria-label', `${dayLabel(idx)}, ${n}명 가능` + (mine ? ', 내가 체크함' : ''));
+      b.append(el('span', 'num', d), el('span', 'cnt', n ? n + '명' : ''));
+      grid.append(b);
+    }
+    G.append(head, grid);
+  });
+  S.lastTapped = null;
+
+  /* 순위 */
+  const K = $('p-rank'); K.innerHTML = '';
+  if (!ranked.length) K.append(el('li', 'muted', '체크가 모이면 여기에 순위가 나옵니다.'));
+  ranked.slice(0, 8).forEach(s => {
+    const li = el('li'), line = el('div', 'line');
+    line.append(el('span', 'd', rangeLabel(s)), el('span', 'n', byStart[s].length + '명'));
+    if (S.isAdmin) {
+      const b = el('button', 'btn small' + (fixed === s ? '' : ' ghost'), fixed === s ? '확정 취소' : '확정');
+      b.dataset.fix = fixed === s ? 'null' : s;
+      line.append(b);
+    }
+    li.append(line, el('div', 'names', byStart[s].join(', ')));
+    K.append(li);
+  });
+
+  S.attendees = fixed ? (byStart[fixed] || []) : [];
+  renderPlace(fixed);
+  renderRecord(fixed);
+  ['p-name', 'p-grid', 'p-rank', 'p-people'].forEach(id => { $(id).closest('.panel').hidden = !!fixed; });
+
+  /* 참여자 */
+  $('p-people-h').textContent = `참여한 사람 ${votes.length}명`;
+  const P = $('p-people'); P.innerHTML = '';
+  if (!votes.length) P.append(el('span', 'muted', '아직 없습니다.'));
+  votes.forEach(v => {
+    const c = el('span', 'chip', `${v.name} ${v.days.length}일`);
+    if (S.isAdmin) {
+      const x = el('button', null, '×');
+      x.dataset.del = v.name; x.setAttribute('aria-label', v.name + ' 삭제');
+      c.append(x);
+    }
+    P.append(c);
+  });
+}
+</script>
+</body>
+</html>
