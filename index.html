@@ -48,7 +48,7 @@ create policy "meet_groups anon all" on meet_groups for all to anon using (true)
 create table if not exists meet_votes (
   poll_id    text not null references meet_polls(id) on delete cascade,
   name       text not null,
-  days       jsonb not null default '[]'::jsonb,   -- 시작 달 1일부터 센 날짜 번호 배열 (둘째 달은 이어서 31, 32 ...)
+  days       jsonb not null default '[]'::jsonb,   -- 고른 날짜(숙박 일정이면 출발일) 번호 배열. 시작 달 1일=1, 둘째 달은 이어서 31, 32 ...
   updated_at timestamptz not null default now(),
   primary key (poll_id, name)
 );
@@ -203,6 +203,8 @@ create policy "meet-photos anon delete" on storage.objects for delete to anon us
   .day.mine.just .num { animation: press .22s ease-out; }
   @keyframes press { from { transform: rotate(-7deg) scale(1.5); opacity: .3; } to { transform: rotate(-7deg) scale(1); opacity: 1; } }
   @media (prefers-reduced-motion: reduce) { .day.mine.just .num { animation: none; } }
+  .day.stay .num { border: 2.5px dashed var(--stamp); opacity: .8; }
+  .legend .l-stay { border: 2.5px dashed var(--stamp); }
   .day.top { box-shadow: inset 0 0 0 2.5px var(--ink); }
   .day.fixed { box-shadow: inset 0 0 0 3px var(--stamp); }
   .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; color: var(--ink-soft); margin-top: 12px; padding: 0 4px; }
@@ -234,6 +236,7 @@ create policy "meet-photos anon delete" on storage.objects for delete to anon us
   .gitem.open { border-left-color: var(--line); }
   .gitem .gd { font-weight: 600; font-size: 17px; }
   .gitem .gt { margin-top: 1px; }
+  .gitem .gcta { font-size: 14px; font-weight: 600; color: var(--stamp); margin-top: 3px; word-break: keep-all; }
   .gitem .gs { font-size: 14px; color: var(--ink-soft); margin-top: 2px; word-break: keep-all; }
 
   .gitem { display: flex; gap: 12px; align-items: center; }
@@ -452,7 +455,8 @@ create policy "meet-photos anon delete" on storage.objects for delete to anon us
     <div class="panel cal">
       <div id="p-grid"></div>
       <div class="legend">
-        <span><i class="l-mine"></i>내가 되는 날</span>
+        <span><i class="l-mine"></i><span id="p-legend-mine">내가 되는 날</span></span>
+        <span id="p-legend-stay" hidden><i class="l-stay"></i>이어지는 날</span>
         <span><i class="l-heat"></i>진할수록 많이 겹침</span>
         <span><i class="l-top"></i>1위</span>
       </div>
@@ -519,8 +523,8 @@ create policy "meet-photos anon delete" on storage.objects for delete to anon us
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 /* ===== 여기 두 줄만 채우세요 ===== */
-const SUPABASE_URL = 'https://rcwneqlwzfplvrihvzyu.supabase.co';        // 예: https://xxxxxxxx.supabase.co
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJjd25lcWx3emZwbHZyaWh2enl1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTEyNjg4ODAsImV4cCI6MjEwNjg0NDg4MH0.StdImJfoPxzTQ2-Ys2_U9BG8mf71n1NVfMr8WKVa8zI';   // anon public key
+const SUPABASE_URL = '';        // 예: https://xxxxxxxx.supabase.co
+const SUPABASE_ANON_KEY = '';   // anon public key
 /* ================================ */
 
 const POLL_MS = 5000;
@@ -736,7 +740,7 @@ async function initGroup() {
   show('v-group');
   const L = $('g-list');
   const { data, error } = await sb.from('meet_polls')
-    .select('id,title,month,nights,confirmed_day,places,confirmed_place,admin_key,group_id')
+    .select('id,title,month,nights,span,confirmed_day,places,confirmed_place,admin_key,group_id')
     .or(`group_id.eq.${groupId},id.eq.${groupId}`);
   if (error) { L.append(el('p', 'status err', '목록을 불러오지 못했습니다. group_id 컬럼이 있는지 확인해 주세요. (' + error.message + ')')); return; }
   const polls = data || [];
@@ -780,7 +784,7 @@ async function initGroup() {
     const used = (Array.isArray(rec.expenses) ? rec.expenses : []).reduce((a, z) => a + (Number(z.amount) || 0), 0);
     return {
       id: x.id, title: x.title, done, start, year: start.getFullYear(),
-      date: done ? (n ? `${fmt(start)}~${end.getMonth() === start.getMonth() ? '' : (end.getMonth() + 1) + '월 '}${end.getDate()}일(${DOW[end.getDay()]})` : fmt(start)) : `${m}월 중, 날짜 정하는 중`,
+      date: done ? (n ? `${fmt(start)}~${end.getMonth() === start.getMonth() ? '' : (end.getMonth() + 1) + '월 '}${end.getDate()}일(${DOW[end.getDay()]})` : fmt(start)) : `${Number(x.span) > 1 ? `${m}월, ${m % 12 + 1}월` : `${m}월`} 중, 날짜 정하는 중`,
       place: rec.place || (cp ? cp.name : ''), used,
       mine: isAdmin && x.admin_key === adminKey,
     };
@@ -809,6 +813,7 @@ async function initGroup() {
       a.href = `${location.pathname}?p=${x.id}` + (x.mine ? `&admin=${adminKey}` : '');
       const body = el('div', 'gbody');
       body.append(el('div', 'gd', x.date), el('div', 'gt', x.title));
+      if (!x.done) body.append(el('div', 'gcta', '클릭하여 참여 가능한 날짜를 정하세요'));
       const sub = [x.place, x.used ? `회비 사용 ${x.used.toLocaleString('ko-KR')}원` : '', x.photos ? `사진 ${x.photos}장` : ''].filter(Boolean).join(', ');
       if (sub) body.append(el('div', 'gs', sub));
       if (x.cover) { const im = el('img', 'gc'); im.src = x.cover; im.loading = 'lazy'; im.alt = ''; a.append(im); }
@@ -887,7 +892,7 @@ async function save() {
   if (error) { S.dirty = true; setStatus('저장하지 못했습니다. 날짜를 다시 눌러 주세요.', true); return; }
   const i = S.votes.findIndex(r => r.name === name);
   if (i >= 0) S.votes[i].days = days; else S.votes.push({ name, days });
-  if (!S.dirty) setStatus(days.length ? `${name} 님, ${days.length}일 저장됨` : '체크한 날이 없습니다');
+  if (!S.dirty) setStatus(days.length ? `${name} 님, ${nightsOf() ? '출발일 ' + days.length + '개' : days.length + '일'} 저장됨` : '체크한 날이 없습니다');
 }
 function setStatus(t, err) {
   $('p-status').textContent = t;
@@ -903,7 +908,7 @@ function bindPoll() {
     S.myName = n; S.dirty = false;
     try { localStorage.setItem('meet_name', n); } catch (e) {}
     syncMine(); syncPicks(); $('pl-name').value = n;
-    setStatus(!n ? '' : S.myDays.size ? `${n} 님이 체크한 날을 불러왔습니다` : `${n} 님, 되는 날을 모두 눌러 주세요`);
+    setStatus(!n ? '' : S.myDays.size ? `${n} 님이 체크한 날을 불러왔습니다` : `${n} 님, ${nightsOf() ? '출발할 수 있는 날' : '되는 날'}을 모두 눌러 주세요`);
     render();
   };
   $('p-name-ok').addEventListener('click', applyName);
@@ -916,6 +921,10 @@ function bindPoll() {
     if (typed !== S.myName) applyName();
     if (!S.myName) { setStatus('먼저 이름을 적어 주세요.', true); $('p-name').focus(); return; }
     const d = Number(b.dataset.day);
+    const total = monthsOf().reduce((a, x) => a + x.last, 0);
+    if (!S.myDays.has(d) && d + nightsOf() > total) {
+      setStatus(`${durLabel(nightsOf())} 일정이 기간을 넘어갑니다. 더 이른 출발일을 골라 주세요.`, true); return;
+    }
     if (S.myDays.has(d)) { S.myDays.delete(d); S.lastTapped = null; }
     else { S.myDays.add(d); S.lastTapped = d; }
     queueSave();
@@ -1305,7 +1314,11 @@ function render() {
   if (document.activeElement !== $('p-nights')) $('p-nights').value = N;
   if (document.activeElement !== $('p-span')) $('p-span').value = months.length;
   $('p-hint').hidden = !N;
-  $('p-hint').textContent = N ? `${durLabel(N)} 일정입니다. ${N + 1}일 연속으로 되는 날을 모두 눌러 주세요.` : '';
+  $('p-hint').textContent = N ? `${durLabel(N)} 일정입니다. 출발할 수 있는 날을 모두 눌러 주세요. 누른 날부터 ${N + 1}일이 함께 표시됩니다.` : '';
+  $('p-legend-mine').textContent = N ? '내가 출발 가능한 날' : '내가 되는 날';
+  $('p-legend-stay').hidden = !N;
+  const myCover = new Set();
+  S.myDays.forEach(s => { for (let k = 1; k <= N; k++) myCover.add(s + k); });
   $('p-rank-h').textContent = N ? `많이 겹친 ${durLabel(N)} 일정` : '많이 겹친 날';
 
   /* 기간 밖 번호(기간을 줄인 경우)는 집계에서 제외 */
@@ -1316,16 +1329,9 @@ function render() {
   votes.forEach(v => v.days.forEach(d => (byDay[d] = byDay[d] || []).push(v.name)));
   const dayMax = Math.max(0, ...Object.values(byDay).map(a => a.length));
 
-  /* 시작일별: 시작일부터 N박 동안 매일 되는 사람 */
+  /* 출발일별 가능한 사람 (당일 일정이면 그 날짜) */
   const byStart = {};
-  votes.forEach(v => {
-    const set = new Set(v.days);
-    for (let s = 1; s + N <= last; s++) {
-      let ok = true;
-      for (let k = 0; k <= N; k++) if (!set.has(s + k)) { ok = false; break; }
-      if (ok) (byStart[s] = byStart[s] || []).push(v.name);
-    }
-  });
+  votes.forEach(v => v.days.forEach(s => { if (s + N <= last) (byStart[s] = byStart[s] || []).push(v.name); }));
   const ranked = Object.keys(byStart).map(Number)
     .sort((a, b) => byStart[b].length - byStart[a].length || a - b);
   const max = ranked.length ? byStart[ranked[0]].length : 0;
@@ -1353,8 +1359,8 @@ function render() {
     R.append(el('div', 'date', '아직 체크한 사람이 없습니다'),
       el('div', 'sub', '이름을 적고 되는 날을 모두 눌러 주세요.'));
   } else if (!max) {
-    R.append(el('div', 'date', `${N + 1}일 연속으로 되는 사람이 아직 없습니다`),
-      el('div', 'sub', `${durLabel(N)} 일정이라 이어진 날을 함께 체크해야 집계됩니다.`));
+    R.append(el('div', 'date', '기간 안에 들어가는 일정이 아직 없습니다'),
+      el('div', 'sub', `${durLabel(N)} 일정이 기간 안에 끝나는 출발일을 골라 주세요.`));
   } else if (tops.length === 1) {
     R.append(el('div', 'label', '모임날'), el('div', 'date', rangeLabel(tops[0])),
       el('div', 'sub', `${votes.length}명 중 ${max}명 ${all}가능`));
@@ -1381,10 +1387,11 @@ function render() {
       if (dow === 6) b.classList.add('sat');
       if (mine) b.classList.add('mine');
       if (mine && S.lastTapped === idx) b.classList.add('just');
+      if (!mine && myCover.has(idx)) b.classList.add('stay');
       if (marked.has(idx)) b.classList.add(fixed ? 'fixed' : 'top');
       b.style.setProperty('--heat', dayMax ? (n / dayMax).toFixed(2) : 0);
       b.setAttribute('aria-pressed', mine);
-      b.setAttribute('aria-label', `${dayLabel(idx)}, ${n}명 가능` + (mine ? ', 내가 체크함' : ''));
+      b.setAttribute('aria-label', `${dayLabel(idx)}${N ? ' 출발' : ''}, ${n}명 가능` + (mine ? ', 내가 체크함' : ''));
       b.append(el('span', 'num', d), el('span', 'cnt', n ? n + '명' : ''));
       grid.append(b);
     }
@@ -1417,7 +1424,7 @@ function render() {
   const P = $('p-people'); P.innerHTML = '';
   if (!votes.length) P.append(el('span', 'muted', '아직 없습니다.'));
   votes.forEach(v => {
-    const c = el('span', 'chip', `${v.name} ${v.days.length}일`);
+    const c = el('span', 'chip', N ? `${v.name} 출발일 ${v.days.length}개` : `${v.name} ${v.days.length}일`);
     if (S.isAdmin) {
       const x = el('button', null, '×');
       x.dataset.del = v.name; x.setAttribute('aria-label', v.name + ' 삭제');
