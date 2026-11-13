@@ -11,7 +11,8 @@
 ==========================================================================
  설치 방법
  1) Supabase SQL Editor에서 아래 SQL을 한 번 실행합니다.
- 2) 이 파일 아래쪽 스크립트의 SUPABASE_URL / SUPABASE_ANON_KEY 두 줄을 채웁니다.
+ 2) 같은 폴더의 config.js에 SUPABASE_URL / SUPABASE_ANON_KEY를 채웁니다.
+    (index.html을 새 버전으로 바꿀 때 config.js는 건드리지 않아도 됩니다.)
  3) GitHub Pages 등에 올린 뒤 주소를 열어 모임을 만듭니다.
 
 create table if not exists meet_polls (
@@ -328,7 +329,7 @@ create policy "meet-photos anon delete" on storage.objects for delete to anon us
   <!-- 설정 안 됨 -->
   <section id="v-setup" class="panel" hidden>
     <h2>Supabase 연결이 필요합니다</h2>
-    <p class="muted">이 파일을 열어 SUPABASE_URL과 SUPABASE_ANON_KEY를 채우고, 파일 맨 위 주석의 SQL을 Supabase에서 한 번 실행해 주세요.</p>
+    <p class="muted">moim 폴더의 config.js에 SUPABASE_URL과 SUPABASE_ANON_KEY를 채워 주세요. 처음 설치라면 index.html 맨 위 주석의 SQL도 Supabase에서 한 번 실행해야 합니다.</p>
     <p id="v-setup-why" class="status err" style="margin-top:10px"></p>
   </section>
 
@@ -444,7 +445,10 @@ create policy "meet-photos anon delete" on storage.objects for delete to anon us
 
       <h2 id="r-photos-h" style="margin-top:20px">사진</h2>
       <div class="photos" id="r-photos"></div>
-      <label class="btn ghost filebtn">사진 올리기<input type="file" id="r-file" accept="image/*" multiple style="position:absolute;opacity:0;width:1px;height:1px"></label>
+      <div class="share">
+        <label class="btn ghost filebtn">사진 올리기<input type="file" id="r-file" accept="image/*" multiple style="position:absolute;opacity:0;width:1px;height:1px"></label>
+        <label class="btn ghost filebtn" id="r-cam-btn" hidden>카메라로 찍기<input type="file" id="r-cam" accept="image/*" capture="environment" style="position:absolute;opacity:0;width:1px;height:1px"></label>
+      </div>
       <p id="r-status" class="status" role="status"></p>
     </div>
 
@@ -528,11 +532,13 @@ create policy "meet-photos anon delete" on storage.objects for delete to anon us
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="config.js"></script>
 <script>
-/* ===== 여기 두 줄만 채우세요 ===== */
-const SUPABASE_URL = '';        // 예: https://xxxxxxxx.supabase.co
-const SUPABASE_ANON_KEY = '';   // anon public key
-/* ================================ */
+/* 연결 정보는 같은 폴더의 config.js에서 읽습니다.
+   index.html을 새 버전으로 바꿔도 config.js만 그대로 두면 연결이 유지됩니다. */
+const CFG = window.MOIM_CONFIG || {};
+const SUPABASE_URL = (CFG.SUPABASE_URL || '').trim();
+const SUPABASE_ANON_KEY = (CFG.SUPABASE_ANON_KEY || '').trim();
 
 const POLL_MS = 5000;
 const DOW = ['일', '월', '화', '수', '목', '금', '토'];
@@ -611,8 +617,11 @@ init();
 async function init() {
   if (!SUPABASE_URL || !SUPABASE_ANON_KEY || !window.supabase) {
     const why = [];
-    if (!SUPABASE_URL) why.push('SUPABASE_URL 값이 비어 있습니다.');
-    if (!SUPABASE_ANON_KEY) why.push('SUPABASE_ANON_KEY 값이 비어 있습니다.');
+    if (!window.MOIM_CONFIG) why.push('같은 폴더의 config.js를 찾지 못했습니다. moim 폴더에 config.js를 올려 주세요.');
+    else {
+      if (!SUPABASE_URL) why.push('config.js의 SUPABASE_URL 값이 비어 있습니다.');
+      if (!SUPABASE_ANON_KEY) why.push('config.js의 SUPABASE_ANON_KEY 값이 비어 있습니다.');
+    }
     if (!window.supabase) why.push('Supabase 라이브러리(cdn.jsdelivr.net)를 불러오지 못했습니다. 네트워크가 이 주소를 막고 있는지 확인해 주세요.');
     $('v-setup-why').textContent = '확인된 원인: ' + why.join(' ');
     return show('v-setup');
@@ -1219,7 +1228,7 @@ function bindRecord() {
     S.record = rec; S.editing = false; setRStatus('기록을 저장했습니다'); render();
   });
 
-  $('r-file').addEventListener('change', async e => {
+  const onPick = async e => {
     const files = [...e.target.files]; e.target.value = '';
     if (!files.length) return;
     let done = 0, fail = 0;
@@ -1233,7 +1242,11 @@ function bindRecord() {
     }
     setRStatus(fail ? `${done}장 올림, ${fail}장 실패. meet-photos 버킷과 정책을 확인해 주세요.` : `사진 ${done}장을 올렸습니다`, !!fail);
     loadPhotos();
-  });
+  };
+  $('r-file').addEventListener('change', onPick);
+  $('r-cam').addEventListener('change', onPick);
+  /* 카메라 버튼은 휴대폰·태블릿에서만 (PC에서는 파일 선택 창이 열려 의미가 없음) */
+  $('r-cam-btn').hidden = !(window.matchMedia && matchMedia('(pointer: coarse)').matches);
 
   $('r-photos').addEventListener('click', e => {
     if (e.target.closest('button')) return;
