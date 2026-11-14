@@ -1,0 +1,36 @@
+# Supabase 무료 프로젝트 자동 일시정지 방지 (keepalive)
+# 위치: rcntiger.github.io 저장소의 .github/workflows/supabase-keepalive.yml
+# 필요한 저장소 Secret 2개: SUPABASE_URL, SUPABASE_ANON_KEY
+name: Supabase keepalive
+
+on:
+  schedule:
+    # 매주 월·목 오전 9시 17분(한국시간) = 0시 17분(UTC)
+    - cron: '17 0 * * 1,4'
+  workflow_dispatch: {}   # Actions 탭에서 수동 실행 가능
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Query database
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_ANON_KEY" ]; then
+            echo "SUPABASE_URL 또는 SUPABASE_ANON_KEY Secret이 없습니다." >&2
+            exit 1
+          fi
+          # 실제 DB 조회가 일어나야 활동으로 잡히므로 테이블을 한 줄 읽음
+          code=$(curl -sS -o /tmp/res.json -w '%{http_code}' --retry 3 --retry-delay 10 \
+            "${SUPABASE_URL%/}/rest/v1/meet_groups?select=id&limit=1" \
+            -H "apikey: $SUPABASE_ANON_KEY" \
+            -H "Authorization: Bearer $SUPABASE_ANON_KEY")
+          echo "HTTP $code"
+          cat /tmp/res.json; echo
+          if [ "$code" -ge 400 ]; then
+            echo "DB 조회 실패 (HTTP $code). 프로젝트가 이미 일시정지됐다면 대시보드에서 Restore 해 주세요." >&2
+            exit 1
+          fi
